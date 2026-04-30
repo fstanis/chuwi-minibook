@@ -1,0 +1,220 @@
+3.9
+---
+
+SSC sensors are now supported through libssc. Light and compass sensor are enabled by default,
+accelerometer and proximity remain experimental, but can be enabled through udev rules.
+
+- SSC sensor support.
+- Logging improvements for sensor discovery.
+- Fix race condition during startup.
+
+3.8
+---
+
+- Require 2.76 or newer for the Gio dependency.
+- Improve handling of buffer sensors which caused a regression in 3.7 for some corner cases.
+
+3.7
+---
+
+This update fixes a regression of 3.6 regarding the fallback for buffer
+sensors with and without triggers.
+
+- Do not hardcode trigger names.
+- Enable ring buffers only when sensor is claimed.
+- Confirm if buffer is usable before using it.
+- Fix doublefree in input-proximity driver.
+
+3.6
+---
+
+- Drop requirement of geoclue user for compass in README.
+- Evaluate polling drivers before buffering drivers.
+
+3.6-RC1
+-------
+
+Release Candidate for v3.6.
+
+- Deployes DBus API documentation to Gitlab Pages.
+- Switch CI from Fedora to Debian.
+- Add support for 'illuminance_clear' light sensors.
+- Add gracefull shutdown to release IIO kernel drivers.
+- Fix IIO sensor disabling on exit.
+- Add support for switch-type proximity sensors.
+- Fix tests when fr_FR locale is unavailable.
+- Poll immediately when a sensor is enabled.
+- Delay DBus notifying and method until first measurement is received.
+- Add property to DBus Orientation for device face-up and face-down.
+- Make compass available for any user instead of only geoclue.
+- Add support for proximity0 sensors.
+- Remove trigger requirement on iio-buffer-accel.
+- Add Matrix room to README.
+- Add release instructions.
+
+3.5
+---
+
+This update fixes sensor hotplugging, and fixes some sensors not working when
+they were assigned a sampling frequency they did not support. This update also
+adds more tests, and corrects the location of the D-Bus policy file.
+
+3.4
+---
+
+This update adds polkit checks for whether a user is allowed to claim a sensor.
+It also fixes the ambient light sensor readings on some systems, a regression in
+the fake-input-accelerometer test binary, and a number of memory leaks.
+
+3.3
+---
+
+This update fixes a bug left-over in one of the 3.2 bug fixes where some
+accelerometers would fail to initialise.
+
+3.2
+---
+
+This update fixes a number of problems new to 3.1 where we started initialising
+internationalisation support in the daemon, and caused problems parsing
+numbers with decimal separator. This update also requires an updated
+version of libgudev to fix one of the bugs uncovered.
+
+3.1
+---
+
+This release includes a number of changes related to the maintenance
+of the project, including porting to meson as a build system, and
+adding a test suite. A long-standing problem with property changes
+being sent as a broadcast was also fixed, now only programs which register
+will receive notifications.
+
+This release also fixes sensor support for accelerometers with different
+scales on different axis, adds support for RGBC light sensors, and reads
+the proximity threshold from sysfs for DeviceTree devices.
+
+3.0
+---
+
+This release adds support for a number of sensors that didn't work
+before, usually due to being combined with other sensors of the
+same or different types (eg. dual-accelerometers, light/proximity
+combined sensors, etc.), and adds support for kernel-exported
+mount-matrix properties on Device Tree hardware.
+
+2.8
+---
+
+This release adds support for accelerometers in ChromeBooks, and also
+fixes the screen orientation in favour of portrait when rotating the
+display instead of favouring the previous orientation.
+
+2.7
+---
+
+This release fixes broken sensor readings on multiple platforms due
+to a compiler optimisation.
+
+2.6
+---
+
+This release adds support for mount matrices coming from the kernel
+itself, checking those more thoroughly for validity. On devices with
+multiple accelerometers, the ones in the base are now ignored.
+
+Support for sensors with uncommon formats was already enhanced (or fixed
+depending on the device). A couple of possible crashes and memory
+leaks were also fixed.
+
+2.5
+---
+
+This release fixes a number of build warnings and bugs, as well as
+ensuring that some devices have non-0 update frequencies, and that
+the sensor scale is set to 1.0 when the device does not export one.
+
+2.4
+---
+
+This release fixes data being incorrectly read from sensors due to
+a naively broken compilation fix. It also supports Geoclue running
+as a different user than "geoclue".
+
+2.3
+---
+
+This release fixes API documentation not being in the tarball,
+removes a work-around for long-standing kernel bug (see README.md
+for details), and ignores accelerometers that are part of gaming
+devices. A number of build warnings were also fixed.
+
+2.2
+---
+
+This release fixes iio-sensor-proxy not receiving udev events
+because of the excessive lockdown added in version 2.1. This
+also fixes a possible crash on startup due to a race condition.
+
+2.1
+---
+
+This release fixes a security problem that will affect services
+other than iio-sensor-proxy, that have a system D-Bus interface.
+Upgrading to this version is highly recommended.
+
+- Make D-Bus policy rules only affect SensorProxy itself
+- Lockdown service through systemd
+- Fix startup problem on machines with a Compass device
+
+2.0
+---
+
+This release adds build fixes, fixes the detection of a number of
+devices that should be supported, stops trying to use devices
+that shouldn't, and adds support for the "mount-matrix" property,
+which can be used to fix the orientation of accelerometers on
+devices where the default does not work.
+
+- Add support for ACCEL_MOUNT_MATRIX udev property
+- Fix startup failure on certain devices
+- Work-around possible kernel bug on certain devices
+- Better supported/unsupported sensors detection
+- Better debug output
+
+1.3
+---
+
+This release adds build fixes, fixes accelerometer unit scaling and
+really fixes regression with the IIO accelerometer in kernel 4.8 that
+was supposed to be fixed in version 1.2.
+
+1.2
+---
+
+This release mainly adds better debug output, and updated testing
+instructions in the README.
+
+- Fix regression with IIO accelerometer in kernel 4.8
+- Fix possible crash in compass handling
+
+1.1
+---
+
+This release adds support for Compasses (only accessible to GeoClue).
+
+- Fix service not starting in a number of cases
+- Fix excessive CPU usage monitoring light sensors on Macs
+- Support light sensors on some Samsung laptops
+- Fix incorrect sensor readings on some devices due to unit scaling
+
+1.0
+---
+
+This is the first stable release of iio-sensor-proxy. It now uses a D-Bus API,
+and supports accelerometers and ambient light sensors.
+
+0.1
+---
+
+This is the first version of iio-sensor-proxy. It supports accelerometers,
+proxying IIO sensors, and mimicking input device accelerometers.

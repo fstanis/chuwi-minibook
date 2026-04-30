@@ -1,0 +1,3 @@
+@DEV /dev/input/event4
+EVIOCGSW(0) 4 00020100
+EVIOCGSW(0) 4 000A0100
