@@ -57,6 +57,13 @@ ______________________________________________________________________
 
 Install components in this order to satisfy dependencies.
 
+Examples below assume **Limine + mkinitcpio** (the CachyOS default). On
+GRUB-based systems, edit `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`
+instead of `/etc/default/limine`, and rebuild with
+`sudo update-grub && sudo update-initramfs -u` (Debian/Ubuntu) or
+`sudo grub2-mkconfig -o /boot/grub2/grub.cfg && sudo dracut -f` (Fedora) instead
+of `sudo limine-mkinitcpio`.
+
 ### 1. dptf_enabler
 
 Unhides BIOS-gated Intel DPTF devices. Required by thermald.
@@ -126,10 +133,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now thermald
 ```
 
-On Arch, use `make install-arch` instead -- it builds via `makepkg` so pacman
-tracks the install. After installing, add `IgnorePkg = thermald` to
-`/etc/pacman.conf` so system upgrades don't replace it with the unpatched repo
-build.
+On Arch and Manjaro, use `make install-arch` instead - it builds via `makepkg`
+so pacman tracks the install. Add `IgnorePkg = thermald` to `/etc/pacman.conf`
+so upgrades don't replace it with the unpatched repo build.
+
+On Debian and Ubuntu, `sudo apt remove thermald` first so the distro package
+doesn't shadow the fork.
+
+On Fedora, `sudo dnf remove thermald` first for the same reason.
 
 Verify: `journalctl -u thermald | grep minibook`. See
 [thermald.md](docs/thermald.md) for patch details and tunable parameters.
@@ -144,19 +155,36 @@ make && sudo make install
 sudo systemctl restart iio-sensor-proxy
 ```
 
-On Arch, use `make install-arch` instead -- it builds via `makepkg` so pacman
-tracks the install. After installing, add `IgnorePkg = iio-sensor-proxy` to
-`/etc/pacman.conf` so system upgrades don't replace it with the unpatched repo
-build.
+On Arch and Manjaro, use `make install-arch` instead - it builds via `makepkg`
+so pacman tracks the install. Add `IgnorePkg = iio-sensor-proxy` to
+`/etc/pacman.conf` so upgrades don't replace it with the unpatched repo build.
 
-If using [Niri](https://github.com/niri-wm/niri), also install
-[`iio-niri`](https://github.com/Zhaith-Izaliel/iio-niri) to bridge orientation
-events to the compositor for screen auto-rotation, and add it to one of your
-Niri config files (e.g. `~/.config/niri/cfg/autostart.kdl`):
+On Debian and Ubuntu, `sudo apt remove iio-sensor-proxy` first so the distro
+package doesn't shadow the fork.
 
-```
-spawn-at-startup "iio-niri" "listen" "--monitor" "DSI-1"
-```
+On Fedora, `sudo dnf remove iio-sensor-proxy` first for the same reason.
+
+The proxy exposes orientation on D-Bus (`net.hadess.SensorProxy`). How that
+becomes a screen rotation depends on your desktop:
+
+- **GNOME and KDE Plasma (Wayland)**: built-in. Enable auto-rotate in the
+  quick-settings panel / System Settings. No extra daemon needed.
+- **Niri**: install [`iio-niri`](https://github.com/Zhaith-Izaliel/iio-niri) and
+  add to one of your Niri config files (e.g.
+  `~/.config/niri/cfg/autostart.kdl`):
+  ```
+  spawn-at-startup "iio-niri" "listen" "--monitor" "DSI-1"
+  ```
+- **Sway / wlroots compositors**: use
+  [`iio-sway`](https://github.com/okeri/iio-sway) (works on Sway, river,
+  Wayfire) or an equivalent bridge for your compositor.
+- **Hyprland**: use
+  [`iio-hyprland`](https://github.com/JeanSchoeller/iio-hyprland).
+
+The patched proxy reports `right-up` whenever the device is in laptop mode, so
+the compositor applies the 270° portrait correction dynamically and switches to
+live accelerometer rotation in tablet mode. Do **not** combine this with a
+static rotation (kernel cmdline, VBT patch, xrandr script) - they will stack.
 
 Verify: `monitor-sensor` and tilt the device. See
 [iio-sensor-proxy.md](docs/iio-sensor-proxy.md) for details.
@@ -188,7 +216,7 @@ This does the following:
 1. Rebuilds the initramfs
 
 Reboot to apply. If the display flickers or shows artifacts, your panel does not
-support that rate -- revert and try a lower value:
+support that rate - revert and try a lower value:
 
 ```
 sudo tools/update-vbt-clock.sh --revert
@@ -246,16 +274,14 @@ link tearing.
 
 ### Display rotation
 
-If you run a daemon that bridges iio-sensor-proxy events to your compositor
-(e.g. [`iio-niri`](https://github.com/Zhaith-Izaliel/iio-niri) for Niri, or the
-built-in support in GNOME and KDE), you do not need any of the methods below.
-The patched iio-sensor-proxy reports `right-up` whenever the device is in laptop
-mode, so the compositor applies the 270° rotation dynamically. In tablet mode it
-switches to live accelerometer- based rotation. There is nothing to configure on
-the kernel/firmware side.
+If your compositor consumes iio-sensor-proxy orientation events (see
+[§7](#7-iio-sensor-proxy) for the per-desktop list), you do not need any of the
+methods below. The patched proxy reports `right-up` in laptop mode so the
+compositor applies the 270° rotation dynamically, and switches to live
+accelerometer rotation in tablet mode. There is nothing to configure on the
+kernel/firmware side.
 
-If you don't run such a daemon -- or your compositor does not consume
-orientation events -- pick one of the methods below for a fixed rotation.
+Otherwise, pick one of the methods below for a fixed rotation.
 
 #### Kernel command line
 
@@ -314,7 +340,7 @@ consoles or login screen.
 
 ### DSI link tearing
 
-Panel Self Refresh (PSR) can cause DSI link tearing on this panel -- the screen
+Panel Self Refresh (PSR) can cause DSI link tearing on this panel - the screen
 partially fills with green and horizontal lines. Disabling PSR with a kernel
 parameter seems to fix it. Add to the kernel command line in
 `/etc/default/limine`:
@@ -338,13 +364,13 @@ cat /sys/power/mem_sleep
 
 The active mode is shown in brackets (e.g. `[s2idle]` or `[deep]`).
 
-### S0ix (s2idle) -- software sleep
+### S0ix (s2idle) - software sleep
 
 Similar to how smartphones sleep: the CPU enters a low-power idle state but the
 system does not fully power down. The hardware stays partially active, allowing
 for faster wake times.
 
-### S3 (deep) -- hardware sleep
+### S3 (deep) - hardware sleep
 
 Traditional suspend-to-RAM. The system powers down everything except memory.
 Power draw should be less than S0ix in theory, but the actual difference on the
