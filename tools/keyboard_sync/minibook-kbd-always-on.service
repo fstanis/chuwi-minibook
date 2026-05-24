@@ -1,0 +1,11 @@
+[Unit]
+Description=Desactivar Temporizador Teclado Chuwi (Root)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/minibook-kbd-timer-off.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

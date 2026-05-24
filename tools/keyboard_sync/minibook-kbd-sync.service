@@ -1,0 +1,10 @@
+[Unit]
+Description=Chuwi Keyboard Backlight UI Sync
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/minibook-kbd-sync.sh
+Restart=always
+
+[Install]
+WantedBy=default.target
