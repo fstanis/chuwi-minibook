@@ -30,6 +30,8 @@
 #define ACPI_MATCH_ID		"MDA6655"
 #define I2C_UNBIND_DRIVER	"mxc4005"
 #define MAX_I2C_BUS		20
+#define MAX_INPUT_DEV		32
+#define LID_SWITCH_NAME		"Lid Switch"
 #define UINPUT_DEV_NAME		"MXC6655 Tablet Mode Control"
 
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
@@ -113,6 +115,10 @@ typedef struct {
 
 typedef struct {
 	guint              timeout_id;
+	gboolean           want_polling;
+	gboolean           lid_closed;
+	gint               lid_fd;
+	guint              lid_watch_id;
 	gint               i2c_fds[2];
 	gint               uinput_fd;
 	gint               ltsm_warned;
@@ -1147,6 +1153,8 @@ mxc6655_discover (GUdevDevice *device)
 	return TRUE;
 }
 
+static void setup_lid_watch (SensorDevice *sensor_device);
+
 static SensorDevice *
 mxc6655_open (GUdevDevice *device)
 {
@@ -1161,6 +1169,7 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->i2c_fds[0] = -1;
 	drv_data->i2c_fds[1] = -1;
 	drv_data->uinput_fd = -1;
+	drv_data->lid_fd = -1;
 	drv_data->mode = -1;
 	drv_data->cur_orient = -1;
 	drv_data->pending_orient = -1;
@@ -1207,7 +1216,165 @@ mxc6655_open (GUdevDevice *device)
 	sensor_device->name = g_strdup ("MXC6655 dual-accel");
 	sensor_device->priv = drv_data;
 
+	setup_lid_watch (sensor_device);
+
 	return sensor_device;
+}
+
+static void
+send_initial_reading (SensorDevice *sensor_device)
+{
+	AccelReadings readings;
+
+	build_synthetic_readings (MXC_ORIENT_RIGHT, &readings);
+	sensor_device->callback_func (sensor_device,
+				      (gpointer) &readings,
+				      sensor_device->user_data);
+}
+
+static gboolean
+polling_wanted (DrvData *drv_data)
+{
+	return drv_data->want_polling && !drv_data->lid_closed;
+}
+
+static void
+start_poll_timer (SensorDevice *sensor_device)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+
+	drv_data->timeout_id = g_timeout_add (GMTR_POLL_MS, poll_sensors, sensor_device);
+	g_source_set_name_by_id (drv_data->timeout_id, "[mxc6655] poll_sensors");
+	g_message ("MXC6655 dual-accel: polling active");
+}
+
+static void
+stop_poll_timer (SensorDevice *sensor_device)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	const char *reason;
+
+	g_source_remove (drv_data->timeout_id);
+	drv_data->timeout_id = 0;
+
+	if (drv_data->lid_closed)
+		reason = "lid closed";
+	else
+		reason = "no client";
+	g_message ("MXC6655 dual-accel: polling idle (%s)", reason);
+}
+
+static void
+update_polling_timer (SensorDevice *sensor_device)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	gboolean wanted = polling_wanted (drv_data);
+
+	if (wanted && drv_data->timeout_id == 0)
+		start_poll_timer (sensor_device);
+	else if (!wanted && drv_data->timeout_id > 0)
+		stop_poll_timer (sensor_device);
+}
+
+static gint
+open_lid_switch (void)
+{
+	for (gint i = 0; i < MAX_INPUT_DEV; i++) {
+		char path[64];
+		char name[256] = { 0 };
+		gint fd;
+
+		g_snprintf (path, sizeof (path), "/dev/input/event%d", i);
+		fd = open (path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+
+		if (ioctl (fd, EVIOCGNAME (sizeof (name)), name) >= 0 &&
+		    strcmp (name, LID_SWITCH_NAME) == 0)
+			return fd;
+
+		close (fd);
+	}
+
+	return -1;
+}
+
+static gboolean
+read_lid_closed (gint fd)
+{
+	unsigned long bits = 0;
+
+	if (ioctl (fd, EVIOCGSW (sizeof (bits)), &bits) < 0)
+		return FALSE;
+
+	return (bits & (1UL << SW_LID)) != 0;
+}
+
+static void
+set_lid_closed (SensorDevice *sensor_device,
+		gboolean      closed)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+
+	if (drv_data->lid_closed == closed)
+		return;
+
+	drv_data->lid_closed = closed;
+	update_polling_timer (sensor_device);
+}
+
+static gboolean
+lid_event_cb (GIOChannel   *channel,
+	      GIOCondition  condition,
+	      gpointer      user_data)
+{
+	SensorDevice *sensor_device = user_data;
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	struct input_event ev;
+
+	if (condition & (G_IO_HUP | G_IO_ERR)) {
+		drv_data->lid_watch_id = 0;
+		return G_SOURCE_REMOVE;
+	}
+
+	while (TRUE) {
+		gsize bytes_read;
+		GIOStatus status;
+
+		status = g_io_channel_read_chars (channel, (gchar *) &ev,
+						  sizeof (ev), &bytes_read, NULL);
+		if (status != G_IO_STATUS_NORMAL || bytes_read != sizeof (ev))
+			break;
+		if (ev.type != EV_SW || ev.code != SW_LID)
+			continue;
+
+		set_lid_closed (sensor_device, ev.value != 0);
+	}
+
+	return G_SOURCE_CONTINUE;
+}
+
+static void
+setup_lid_watch (SensorDevice *sensor_device)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	GIOChannel *channel;
+
+	drv_data->lid_fd = open_lid_switch ();
+	if (drv_data->lid_fd < 0) {
+		g_debug ("No lid switch found, polling not lid-gated");
+		return;
+	}
+
+	drv_data->lid_closed = read_lid_closed (drv_data->lid_fd);
+
+	channel = g_io_channel_unix_new (drv_data->lid_fd);
+	g_io_channel_set_encoding (channel, NULL, NULL);
+	g_io_channel_set_buffered (channel, FALSE);
+	drv_data->lid_watch_id = g_io_add_watch (channel,
+						 G_IO_IN | G_IO_HUP | G_IO_ERR,
+						 lid_event_cb, sensor_device);
+	g_io_channel_unref (channel);
 }
 
 static void
@@ -1216,36 +1383,27 @@ mxc6655_set_polling (SensorDevice *sensor_device,
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 
-	if (drv_data->timeout_id > 0 && state)
+	if (drv_data->want_polling == state)
 		return;
-	if (drv_data->timeout_id == 0 && !state)
-		return;
+	drv_data->want_polling = state;
 
-	if (drv_data->timeout_id) {
-		g_source_remove (drv_data->timeout_id);
-		drv_data->timeout_id = 0;
-	}
+	/* Send a first reading so a client's Claim() returns even if the lid is
+	 * closed and the poll timer stays stopped. */
+	if (state)
+		send_initial_reading (sensor_device);
 
-	if (state) {
-		drv_data->timeout_id = g_timeout_add (GMTR_POLL_MS, poll_sensors, sensor_device);
-		g_source_set_name_by_id (drv_data->timeout_id, "[mxc6655_set_polling] poll_sensors");
-
-		/* Send initial orientation reading */
-		{
-			AccelReadings readings;
-
-			build_synthetic_readings (MXC_ORIENT_RIGHT, &readings);
-			sensor_device->callback_func (sensor_device,
-						      (gpointer) &readings,
-						      sensor_device->user_data);
-		}
-	}
+	update_polling_timer (sensor_device);
 }
 
 static void
 mxc6655_close (SensorDevice *sensor_device)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
+
+	if (drv_data->lid_watch_id > 0)
+		g_source_remove (drv_data->lid_watch_id);
+	if (drv_data->lid_fd >= 0)
+		close (drv_data->lid_fd);
 
 	if (drv_data->uinput_fd >= 0) {
 		ioctl (drv_data->uinput_fd, UI_DEV_DESTROY);

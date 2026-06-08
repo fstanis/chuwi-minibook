@@ -15,8 +15,10 @@ source=()
 _source_root="${startdir}/../.."
 
 pkgver() {
-  awk -F"'" '/^PACKAGE_VERSION=/ {print $2; exit}' \
-    "${_source_root}/configure"
+  local major minor
+  major="$(awk -F'[][]' '/^m4_define\(\[td_major_version\]/ {print $4}' "${_source_root}/configure.ac")"
+  minor="$(awk -F'[][]' '/^m4_define\(\[td_minor_version\]/ {print $4}' "${_source_root}/configure.ac")"
+  echo "${major}.${minor}"
 }
 
 _clean_stale_autotools_artifacts() {
@@ -33,7 +35,9 @@ _bootstrap_if_needed() {
 
 prepare() {
   rm -rf "${srcdir}/src"
-  cp -a "${_source_root}" "${srcdir}/src"
+  mkdir -p "${srcdir}/src"
+  tar -C "${_source_root}" --exclude='./packaging' -cf - . | \
+    tar -C "${srcdir}/src" -xf -
   cd "${srcdir}/src"
   _clean_stale_autotools_artifacts
 }

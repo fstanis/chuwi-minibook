@@ -27,6 +27,41 @@ The fork source lives in `iio-sensor-proxy/`.
 
 See [GUIDE.md](../GUIDE.md#7-iio-sensor-proxy).
 
+## Lazy polling (`--lazy`)
+
+By default the proxy polls both accelerometers continuously (every 50 ms) for
+as long as it runs, so that tablet-mode transitions are detected even when no
+desktop client is listening. This keeps the I2C bus and the sensors active the
+whole time the daemon is up.
+
+The `--lazy` flag makes the proxy poll a sensor only while a D-Bus client has
+explicitly claimed it (via `ClaimAccelerometer` / `ClaimLight`), and stops
+polling again once the last client releases it. This saves power when nothing
+is consuming orientation events, at the cost of tablet-mode detection being
+inactive until a client claims the accelerometer.
+
+To enable it, add the flag to the service's `ExecStart`:
+
+```
+sudo systemctl edit iio-sensor-proxy
+```
+
+```
+[Service]
+ExecStart=
+ExecStart=/usr/lib/iio-sensor-proxy --lazy
+```
+
+Then `sudo systemctl restart iio-sensor-proxy`. The path varies by distro
+(`/usr/lib` on Arch, `/usr/libexec` elsewhere); `systemctl cat
+iio-sensor-proxy` shows the current `ExecStart` to copy.
+
+## Lid gating
+
+Polling stops while the lid is closed (regardless of `--lazy` or any claim) and
+resumes when it opens; tablet mode is unaffected. The driver logs each
+transition to the journal: `journalctl -u iio-sensor-proxy | grep 'polling'`.
+
 ## Runtime requirement
 
 The `acpi_call` kernel module must be loaded for tablet mode transitions (the

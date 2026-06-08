@@ -41,6 +41,7 @@ typedef struct {
 	GDBusConnection *connection;
 	guint name_id;
 	int ret;
+	gboolean lazy;
 
 	PolkitAuthority *auth;
 
@@ -426,7 +427,8 @@ client_release (SensorData            *data,
 
 	g_hash_table_remove (ht, sender);
 
-	if (driver_type_exists (data, driver_type) &&
+	if (data->lazy &&
+	    driver_type_exists (data, driver_type) &&
 	    g_hash_table_size (ht) == 0) {
 		SensorDevice *sensor_device = DEVICE_FOR_TYPE(driver_type);
 		driver_set_polling (sensor_device, FALSE);
@@ -782,6 +784,9 @@ name_acquired_handler (GDBusConnection *connection,
 		}
 
 		DEVICE_FOR_TYPE(i) = sensor_device;
+
+		if (!data->lazy)
+			driver_set_polling (sensor_device, TRUE);
 	}
 
 	if (!any_sensors_left (data))
@@ -1117,6 +1122,8 @@ sensor_changes (GUdevClient *client,
 						driver_set_polling (sensor_device, TRUE);
 					} else {
 						send_driver_changed_dbus_event (data, driver->type);
+						if (!data->lazy)
+							driver_set_polling (sensor_device, TRUE);
 					}
 				}
 				break;
@@ -1143,9 +1150,11 @@ int main (int argc, char **argv)
 	g_autoptr(GError) error = NULL;
 	gboolean verbose = FALSE;
 	gboolean replace = FALSE;
+	gboolean lazy = FALSE;
 	const GOptionEntry options[] = {
 		{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &verbose, "Show extra debugging information", NULL },
 		{ "replace", 'r', 0, G_OPTION_ARG_NONE, &replace, "Replace the running instance of iio-sensor-proxy", NULL },
+		{ "lazy", 0, 0, G_OPTION_ARG_NONE, &lazy, "Only poll sensors while a D-Bus client has claimed them", NULL },
 		{ NULL}
 	};
 	int ret = 0;
@@ -1172,6 +1181,7 @@ int main (int argc, char **argv)
 	data->previous_orientation = ORIENTATION_UNDEFINED;
 	data->previous_tilt = TILT_UNDEFINED;
 	data->uses_lux = TRUE;
+	data->lazy = lazy;
 
 	/* Set up D-Bus */
 	setup_dbus (data, replace);

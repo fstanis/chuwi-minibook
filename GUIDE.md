@@ -373,12 +373,16 @@ for faster wake times.
 ### S3 (deep) - hardware sleep
 
 Traditional suspend-to-RAM. The system powers down everything except memory.
-Power draw should be less than S0ix in theory, but the actual difference on the
-MiniBook X needs testing.
+
+**Recommended.** On the MiniBook X, S0ix does not reach its low-power
+residency states reliably and drains the battery noticeably overnight. S3
+("deep") suspends to a true low-power state and, in testing on this device,
+gives substantially better standby battery life. Switch to `deep` and make it
+the default unless you have a specific reason to keep s2idle.
 
 ### Switching between modes
 
-To switch to S3 (hardware sleep):
+To switch to S3 (hardware sleep, recommended):
 
 ```
 echo deep | sudo tee /sys/power/mem_sleep
@@ -390,7 +394,7 @@ To switch to S0ix (software sleep):
 echo s2idle | sudo tee /sys/power/mem_sleep
 ```
 
-These changes do not persist across reboots. To make the setting permanent, add
-`mem_sleep_default=deep` or `mem_sleep_default=s2idle` to the kernel command
-line in `/etc/default/limine` and rebuild the initramfs with
-`sudo limine-mkinitcpio`.
+These changes do not persist across reboots. To make `deep` the default
+permanently, add `mem_sleep_default=deep` to the kernel command line in
+`/etc/default/limine` and rebuild the initramfs with `sudo limine-mkinitcpio`
+(use `mem_sleep_default=s2idle` if you ever need to go back).

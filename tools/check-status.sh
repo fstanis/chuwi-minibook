@@ -440,6 +440,25 @@ read_iio_version() {
   echo "NOT FOUND"
 }
 
+read_iio_polling_line() {
+  journalctl -u iio-sensor-proxy --no-pager 2>/dev/null \
+    | grep -E 'MXC6655 dual-accel: polling (active|idle)' \
+    | tail -1 || true
+}
+
+check_iio_polling() {
+  local line
+  line="$(read_iio_polling_line)"
+  if [[ -z "${line}" ]]; then
+    return
+  fi
+  if [[ "${line}" == *"polling active"* ]]; then
+    print_detail "sensor polling active (client claimed)"
+  else
+    print_detail "sensor polling idle${line#*polling idle}"
+  fi
+}
+
 check_services() {
   echo ""
   echo "--- services ---"
@@ -451,6 +470,7 @@ check_services() {
 
   iio_ver="$(read_iio_version)"
   check_service "iio-sensor-proxy" "${iio_ver}"
+  check_iio_polling
 }
 
 print_warnings() {
