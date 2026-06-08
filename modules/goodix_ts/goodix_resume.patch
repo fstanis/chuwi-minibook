@@ -88,6 +88,3 @@
  	if (!error && config_ver != ts->config[0])
  		dev_info(dev, "Config version mismatch %d != %d, resetting controller\n",
  			 config_ver, ts->config[0]);
-@@ -1577,3 +1620,3 @@ MODULE_AUTHOR("Bastien Nocera <hadess@hadess.net>");
- MODULE_DESCRIPTION("Goodix touchscreen driver");
- MODULE_LICENSE("GPL v2");

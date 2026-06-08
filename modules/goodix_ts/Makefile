@@ -1,5 +1,6 @@
 DKMS_NAME = goodix_ts
 KVER ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+KVER_MM ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+')
 DKMS_VERSION = $(KVER)-minibook1
 DKMS_DIR = /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
 KERNEL_GIT = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain
@@ -9,7 +10,7 @@ SOURCES = goodix.c goodix.h goodix_fwupload.c
 all: .patched.stamp
 
 $(SOURCES):
-	curl -fsSL -o $@ "$(KERNEL_GIT)/$(TOUCHSCREEN_DIR)/$@?h=v$(KVER)"
+	curl -fsSL -o $@ "$(KERNEL_GIT)/$(TOUCHSCREEN_DIR)/$@?h=linux-$(KVER_MM).y"
 
 .patched.stamp: $(SOURCES) goodix_resume.patch
 	patch -N -p1 < goodix_resume.patch || true

@@ -192,6 +192,22 @@ restores the last brightness level.
 `auto_off_timer = 0` keeps the backlight on indefinitely regardless of keyboard
 activity. This matches the BIOS setting "Keyboard Backlight Mode = Always on."
 
+#### Tracking EC-initiated changes (opt-in)
+
+Enable the `poll_hw_changed` module parameter to have GNOME/KDE/etc. track
+brightness changes triggered by the dedicated backlight toggle key or the
+auto-off timer:
+
+```
+echo 'options minibook_ec poll_hw_changed=1' \
+  | sudo tee /etc/modprobe.d/minibook_ec.conf
+```
+
+This adds a `brightness_hw_changed` attribute under the LED node. UPower
+watches it via `poll(2)`/`POLLPRI` and re-broadcasts changes over D-Bus, which
+is what desktop environments listen to for "the keyboard backlight changed."
+Off by default because it requires a 250 ms in-kernel poll of the EC.
+
 ### Sysfs attributes
 
 Four attributes appear under the platform device

@@ -58,7 +58,13 @@ Every installable component should have a `Makefile` with `install` and
 - Follow the official Linux kernel coding style
   (`Documentation/process/coding-style.rst`)
 - Build with `make` (standard kbuild `obj-m` pattern)
-- Use `LLVM=1` for clang builds (sets CC, LD, AR, NM, etc.)
+- `dkms.conf` files detect the target kernel's compiler at build time via a
+  `LLVM_FLAG=$(grep -sq CC_IS_CLANG=y ${kernel_source_dir}/.config && echo
+  LLVM=1)` line; the value (either `LLVM=1` or empty) is interpolated into
+  `MAKE[0]`. This picks `LLVM=1` for clang-built kernels (CachyOS, some Arch
+  builds, …) and gcc for everyone else (Debian, RHEL, openSUSE, …), and works
+  for DKMS auto-rebuild on kernel upgrades because the check reads the *target*
+  kernel's `.config`.
 - Include `dkms.conf` for DKMS packaging
 - When patching an existing upstream driver: `make` downloads the kernel
   source files for the running kernel version and applies a `.patch`;

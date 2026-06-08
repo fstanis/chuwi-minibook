@@ -20,15 +20,31 @@
  * expiry the firmware closes the gate. Keyboard activity re-arms it.
  * auto_off_timer == 0 → writes 0x0411 = 0xEE; firmware skips the decrement,
  * matching BIOS "Keyboard Backlight Mode = Always on".
+ *
+ * The EC firmware silently mutates the LED on its own (BIOS-defined Fn-key
+ * toggles brightness, auto-off timer closes the gate). It does not raise an
+ * SCI / ACPI Notify, so the host learns about EC-initiated changes only by
+ * reading the PWM. The optional poll_hw_changed module parameter enables a
+ * 250 ms delayed_work that surfaces deltas via LED_BRIGHT_HW_CHANGED so
+ * UPower / GNOME / KDE can pick them up; off by default.
  */
 
 #include <linux/device.h>
+#include <linux/devm-helpers.h>
 #include <linux/errno.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/leds.h>
+#include <linux/moduleparam.h>
 #include <linux/sysfs.h>
+#include <linux/workqueue.h>
 
 #include "minibook_ec.h"
+
+static bool poll_hw_changed;
+module_param(poll_hw_changed, bool, 0444);
+MODULE_PARM_DESC(poll_hw_changed,
+		 "Opt in to polling the EC and surfacing EC-initiated brightness changes via the LED-class brightness_hw_changed attribute (default: off)");
 
 #define IT5570E_KBD_BL_DCR		0x1803
 #define IT5570E_KBD_BL_GPIO_GATE	0x1611
@@ -40,10 +56,13 @@
 
 #define KBD_BL_MAX_BRIGHTNESS		0xFF
 #define KBD_BL_LED_NAME			"minibook::kbd_backlight"
+#define KBD_BL_POLL_INTERVAL		(HZ / 4)
 
 struct kbd_backlight {
 	struct led_classdev cdev;
 	struct minibook_ec *ec;
+	struct delayed_work poll_work;
+	u8 last_observed;
 };
 
 static struct kbd_backlight *dev_to_kbl(struct device *dev)
@@ -104,11 +123,13 @@ static void kbd_bl_set_auto_off(struct minibook_ec *ec, bool enable)
 static int kbd_bl_brightness_set(struct led_classdev *cdev,
 				 enum led_brightness value)
 {
-	struct minibook_ec *ec = cdev_to_ec(cdev);
+	struct kbd_backlight *kbl =
+		container_of(cdev, struct kbd_backlight, cdev);
 
-	kbd_bl_set_duty(ec, value);
-	if (kbd_bl_timer_suspended(ec))
-		kbd_bl_set_output(ec, value != 0);
+	kbd_bl_set_duty(kbl->ec, value);
+	if (kbd_bl_timer_suspended(kbl->ec))
+		kbd_bl_set_output(kbl->ec, value != 0);
+	kbl->last_observed = value;
 	return 0;
 }
 
@@ -119,6 +140,23 @@ static enum led_brightness kbd_bl_brightness_get(struct led_classdev *cdev)
 	if (kbd_bl_output_gated(ec))
 		return LED_OFF;
 	return minibook_ec_i2ec_read(ec, IT5570E_KBD_BL_DCR);
+}
+
+static void kbd_bl_poll_work(struct work_struct *work)
+{
+	struct kbd_backlight *kbl = container_of(to_delayed_work(work),
+						 struct kbd_backlight,
+						 poll_work);
+	enum led_brightness current_bri = kbd_bl_brightness_get(&kbl->cdev);
+
+	if (current_bri != kbl->last_observed) {
+		kbl->last_observed = current_bri;
+		led_classdev_notify_brightness_hw_changed(&kbl->cdev,
+							  current_bri);
+	}
+
+	queue_delayed_work(system_power_efficient_wq, &kbl->poll_work,
+			   round_jiffies_relative(KBD_BL_POLL_INTERVAL));
 }
 
 static ssize_t auto_off_timer_show(struct device *dev,
@@ -157,6 +195,7 @@ ATTRIBUTE_GROUPS(kbd_bl);
 int minibook_ec_register_kbd_backlight(struct minibook_ec *ec)
 {
 	struct kbd_backlight *kbl;
+	int ret;
 
 	if (!ec->pnpcfg_available)
 		return -ENODEV;
@@ -172,7 +211,24 @@ int minibook_ec_register_kbd_backlight(struct minibook_ec *ec)
 	kbl->cdev.brightness_get = kbd_bl_brightness_get;
 	kbl->cdev.groups = kbd_bl_groups;
 	kbl->cdev.flags = LED_CORE_SUSPENDRESUME;
+	if (poll_hw_changed)
+		kbl->cdev.flags |= LED_BRIGHT_HW_CHANGED;
 
 	ec->kbd_bl = kbl;
-	return devm_led_classdev_register(&ec->pdev->dev, &kbl->cdev);
+	ret = devm_led_classdev_register(&ec->pdev->dev, &kbl->cdev);
+	if (ret)
+		return ret;
+
+	if (!poll_hw_changed)
+		return 0;
+
+	kbl->last_observed = kbd_bl_brightness_get(&kbl->cdev);
+	ret = devm_delayed_work_autocancel(&ec->pdev->dev, &kbl->poll_work,
+					   kbd_bl_poll_work);
+	if (ret)
+		return ret;
+
+	queue_delayed_work(system_power_efficient_wq, &kbl->poll_work,
+			   round_jiffies_relative(KBD_BL_POLL_INTERVAL));
+	return 0;
 }
