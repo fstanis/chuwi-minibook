@@ -215,8 +215,13 @@ This does the following:
 1. Adds `i915.vbt_firmware=vbt` to the Limine kernel command line
 1. Rebuilds the initramfs
 
-Reboot to apply. If the display flickers or shows artifacts, your panel does not
-support that rate - revert and try a lower value:
+Reboot to apply. If the display flickers or shows artifacts, first make sure the
+desktop is actually running at the new rate: a saved display config that still
+pins the old rate makes the compositor fall back to a driver-synthesised mode,
+which produces identical artifacts (see
+[vbt-patch.md](docs/vbt-patch.md#what-rate-to-use)). Only if artifacts persist
+at the correct rate does the panel not support it - revert and try a lower
+value:
 
 ```
 sudo tools/update-vbt-clock.sh --revert

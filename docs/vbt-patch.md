@@ -68,8 +68,19 @@ sudo update-vbt-clock 90
 ```
 
 Not all units ship with the exact same panel, so 90 Hz may not work on yours. If
-you see flickering, color banding, or horizontal lines after rebooting, your
-panel does not support that rate -- revert and try a lower value:
+you see flickering, color banding, or horizontal lines after rebooting, **first
+check the desktop is actually running at the patched rate**. The panel has a
+single timing descriptor, so patching replaces the old rate rather than adding a
+new one: a saved display configuration (e.g. GNOME's `~/.config/monitors.xml`)
+that still pins the pre-patch rate now references a mode that no longer exists,
+and the compositor silently falls back to a driver-synthesised mode. The panel
+is then programmed for one rate and scanned out at another, which produces
+exactly these artifacts. Immediately after patching, any saved config is
+guaranteed stale, so this is the more likely cause. Select the new rate in
+display settings and the artifacts should clear.
+
+Only if the artifacts persist while running at the patched rate does the panel
+not support it -- revert and try a lower value:
 
 ```
 sudo update-vbt-clock --revert
