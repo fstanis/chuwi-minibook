@@ -227,6 +227,10 @@ value:
 sudo tools/update-vbt-clock.sh --revert
 ```
 
+**Suspend and resume before considering the rate proven.** The DSI link is
+re-trained on resume, and a marginal clock can survive hours from a cold boot
+then fail on the first lid reopen, with no kernel error logged.
+
 See [vbt-patch.md](docs/vbt-patch.md) for the full tool reference and guidance
 on choosing a refresh rate.
 

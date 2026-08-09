@@ -60,6 +60,13 @@ show the new refresh rate.
 
 ## What rate to use
 
+> **Treat the refresh-rate patch as an experiment, not a default.** Panels vary
+> between units, and a rate can run cleanly for hours from a cold boot and still
+> fail on the first suspend/resume, taking a revert and a reboot to clear and
+> leaving temporary image retention behind. Suspend-test before relying on it,
+> and see "What rate to use" below. This is why the patch is not part of
+> `bootstrap-ubuntu.sh`.
+
 The stock rate is 50 Hz. Try 90 Hz first -- it is a noticeable improvement in
 smoothness and works on most MiniBook X units:
 
@@ -85,6 +92,25 @@ not support it -- revert and try a lower value:
 ```
 sudo update-vbt-clock --revert
 ```
+
+**Test a suspend/resume cycle before considering a rate proven.** A cold boot is
+not a sufficient test: the DSI link is brought up from scratch at boot but is
+re-trained on resume, so a panel that is marginal at the requested clock can run
+for hours from cold and then fail the moment the lid is reopened. The symptom is
+distinctive and much more severe than the mismatch artifacts above: roughly half
+the scanlines missing entirely, with horizontal light-trail smearing on the
+rest.
+
+Two things make that failure mode easy to misread. The driver logs nothing at
+all -- no FIFO underruns, no link errors, no atomic commit failures -- so the
+kernel believes it is driving the panel correctly. And because it is not the
+stale-config problem above, the mode really is the patched one, so the first
+check passes and points the wrong way. Forcing a fresh modeset does not clear
+it; only reverting does.
+
+Prolonged operation in that state can leave image retention on the panel,
+visible as faint marks against black. On an LCD this is normally temporary and
+fades over hours or days.
 
 If the display does not come up at all after a reboot, the kernel falls back to
 the BIOS VBT (50 Hz) automatically when the firmware file is missing or corrupt.

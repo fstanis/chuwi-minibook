@@ -162,8 +162,11 @@ main() {
 
   echo
   echo "Done — reboot to apply the kernel cmdline."
-  echo "Refresh rate is separate: sudo tools/update-vbt-clock.sh 90"
   echo "thermald needs BIOS changes first, see GUIDE.md."
+  echo
+  echo "The VBT refresh rate is deliberately NOT applied here: a raised pixel"
+  echo "clock can pass a cold boot and still fail on the first suspend."
+  echo "Read docs/vbt-patch.md before running update-vbt-clock."
 }
 
 main "$@"
