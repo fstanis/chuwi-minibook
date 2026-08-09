@@ -6,18 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 
 readonly VBT_TOOL="${SCRIPT_DIR}/../vbt_patch/vbt_patch"
-readonly SYS_VBT="/sys/kernel/debug/dri/0000:00:02.0/i915_vbt"
 readonly FIRMWARE_VBT="/lib/firmware/vbt"
-readonly MKINITCPIO_CONF="/etc/mkinitcpio.conf"
-readonly LIMINE_CONF="/etc/default/limine"
+readonly CMDLINE_ARG="i915.vbt_firmware=vbt"
 
-revert() {
-  if [[ -f "${LIMINE_CONF}" ]]; then
-    sed -i 's| i915\.vbt_firmware=vbt||g' "${LIMINE_CONF}"
-    echo "Removed i915.vbt_firmware=vbt from ${LIMINE_CONF}"
-  fi
-  echo "Revert complete — reboot to apply."
-}
+readonly MKINITCPIO_CONF="/etc/mkinitcpio.conf"
+readonly DRACUT_CONF="/etc/dracut.conf.d/90-vbt.conf"
+readonly LIMINE_CONF="/etc/default/limine"
+readonly GRUB_CONF="/etc/default/grub"
+
+SYS_VBT=""
+BOOTLOADER=""
+INITRAMFS=""
 
 require_root() {
   if (( EUID != 0 )); then
@@ -26,20 +25,38 @@ require_root() {
   fi
 }
 
-check_environment() {
-  if [[ ! -f "${SYS_VBT}" ]]; then
-    echo "${SYS_VBT} not found — is i915 loaded?" >&2
+find_sys_vbt() {
+  local candidate
+  for candidate in /sys/kernel/debug/dri/*/i915_vbt; do
+    if [[ -f "${candidate}" ]]; then
+      SYS_VBT="${candidate}"
+      return
+    fi
+  done
+  echo "No i915_vbt found under /sys/kernel/debug/dri — is i915 loaded?" >&2
+  exit 1
+}
+
+detect_bootloader() {
+  if [[ -f "${LIMINE_CONF}" ]]; then
+    BOOTLOADER="limine"
+  elif [[ -f "${GRUB_CONF}" ]]; then
+    BOOTLOADER="grub"
+  else
+    echo "No supported bootloader config found (limine, grub)" >&2
     exit 1
   fi
+}
 
-  if ! command -v mkinitcpio &>/dev/null \
-      && ! command -v limine-mkinitcpio &>/dev/null; then
-    echo "Neither mkinitcpio nor limine-mkinitcpio found" >&2
-    exit 1
-  fi
-
-  if [[ ! -f "${LIMINE_CONF}" ]]; then
-    echo "${LIMINE_CONF} not found — only Limine is supported" >&2
+detect_initramfs() {
+  if command -v mkinitcpio &>/dev/null || command -v limine-mkinitcpio &>/dev/null; then
+    INITRAMFS="mkinitcpio"
+  elif command -v dracut &>/dev/null; then
+    INITRAMFS="dracut"
+  elif command -v update-initramfs &>/dev/null; then
+    INITRAMFS="initramfs-tools"
+  else
+    echo "No supported initramfs generator found" >&2
     exit 1
   fi
 }
@@ -60,58 +77,117 @@ patch_vbt() {
     exit 1
   fi
 
-  local input_vbt
+  local input_vbt output_vbt
   input_vbt="$(mktemp)"
-  cp "${SYS_VBT}" "${input_vbt}"
-
-  local output_vbt
   output_vbt="$(mktemp)"
+  cp "${SYS_VBT}" "${input_vbt}"
 
   "${VBT_TOOL}" "${input_vbt}" --hz "${framerate}" "${output_vbt}"
   rm -f "${input_vbt}"
 
-  cp "${output_vbt}" "${FIRMWARE_VBT}"
-  chmod 644 "${FIRMWARE_VBT}"
+  install -Dm644 "${output_vbt}" "${FIRMWARE_VBT}"
   rm -f "${output_vbt}"
   echo "Installed patched VBT to ${FIRMWARE_VBT}"
 }
 
-update_mkinitcpio() {
-  if grep -q '/lib/firmware/vbt' "${MKINITCPIO_CONF}"; then
-    return
-  fi
-
-  if grep -qE '^FILES=\(\)' "${MKINITCPIO_CONF}"; then
-    sed -i 's|^FILES=()|FILES=(/lib/firmware/vbt)|' "${MKINITCPIO_CONF}"
-  elif grep -qE '^FILES=\(' "${MKINITCPIO_CONF}"; then
-    sed -i 's|^FILES=(\(.*\))|FILES=(\1 /lib/firmware/vbt)|' "${MKINITCPIO_CONF}"
-  else
-    echo 'FILES=(/lib/firmware/vbt)' >> "${MKINITCPIO_CONF}"
-  fi
-  echo "Updated ${MKINITCPIO_CONF}"
+update_initramfs_conf() {
+  case "${INITRAMFS}" in
+  mkinitcpio)
+    if grep -q "${FIRMWARE_VBT}" "${MKINITCPIO_CONF}"; then
+      return
+    fi
+    if grep -qE '^FILES=\(\)' "${MKINITCPIO_CONF}"; then
+      sed -i "s|^FILES=()|FILES=(${FIRMWARE_VBT})|" "${MKINITCPIO_CONF}"
+    elif grep -qE '^FILES=\(' "${MKINITCPIO_CONF}"; then
+      sed -i "s|^FILES=(\(.*\))|FILES=(\1 ${FIRMWARE_VBT})|" "${MKINITCPIO_CONF}"
+    else
+      echo "FILES=(${FIRMWARE_VBT})" >>"${MKINITCPIO_CONF}"
+    fi
+    echo "Updated ${MKINITCPIO_CONF}"
+    ;;
+  dracut)
+    printf 'install_items+=" %s "\n' "${FIRMWARE_VBT}" >"${DRACUT_CONF}"
+    echo "Wrote ${DRACUT_CONF}"
+    ;;
+  initramfs-tools)
+    # initramfs-tools pulls /lib/firmware in via the stock hooks; nothing to do.
+    ;;
+  esac
 }
 
 update_cmdline() {
-  if grep -q 'i915.vbt_firmware=vbt' "${LIMINE_CONF}"; then
-    return
-  fi
-
-  if ! grep -qE '^KERNEL_CMDLINE\[default\]' "${LIMINE_CONF}"; then
-    echo "Could not find KERNEL_CMDLINE[default] in ${LIMINE_CONF}" >&2
-    exit 1
-  fi
-
-  sed -i '/^KERNEL_CMDLINE\[default\]/s|"$| i915.vbt_firmware=vbt"|' "${LIMINE_CONF}"
-  echo "Added i915.vbt_firmware=vbt to kernel cmdline"
+  case "${BOOTLOADER}" in
+  limine)
+    if grep -q "${CMDLINE_ARG}" "${LIMINE_CONF}"; then
+      return
+    fi
+    if ! grep -qE '^KERNEL_CMDLINE\[default\]' "${LIMINE_CONF}"; then
+      echo "Could not find KERNEL_CMDLINE[default] in ${LIMINE_CONF}" >&2
+      exit 1
+    fi
+    sed -i "/^KERNEL_CMDLINE\[default\]/s|\"$| ${CMDLINE_ARG}\"|" "${LIMINE_CONF}"
+    ;;
+  grub)
+    if grep -q "${CMDLINE_ARG}" "${GRUB_CONF}"; then
+      return
+    fi
+    if ! grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=' "${GRUB_CONF}"; then
+      echo "Could not find GRUB_CMDLINE_LINUX_DEFAULT in ${GRUB_CONF}" >&2
+      exit 1
+    fi
+    sed -i "/^GRUB_CMDLINE_LINUX_DEFAULT=/s|\"$| ${CMDLINE_ARG}\"|" "${GRUB_CONF}"
+    ;;
+  esac
+  echo "Added ${CMDLINE_ARG} to kernel cmdline (${BOOTLOADER})"
 }
 
-rebuild_initramfs() {
-  if command -v limine-mkinitcpio &>/dev/null; then
-    limine-mkinitcpio
-  else
-    mkinitcpio -P
-  fi
+rebuild() {
+  case "${INITRAMFS}" in
+  mkinitcpio)
+    if command -v limine-mkinitcpio &>/dev/null; then
+      limine-mkinitcpio
+    else
+      mkinitcpio -P
+    fi
+    ;;
+  dracut | initramfs-tools)
+    if command -v update-initramfs &>/dev/null; then
+      update-initramfs -u -k all
+    else
+      dracut -f --regenerate-all
+    fi
+    ;;
+  esac
   echo "Initramfs rebuilt"
+
+  if [[ "${BOOTLOADER}" == "grub" ]]; then
+    update-grub
+  fi
+}
+
+revert() {
+  rm -f "${FIRMWARE_VBT}" "${DRACUT_CONF}"
+
+  if [[ -f "${LIMINE_CONF}" ]]; then
+    sed -i "s| ${CMDLINE_ARG}||g" "${LIMINE_CONF}"
+  fi
+  if [[ -f "${GRUB_CONF}" ]]; then
+    sed -i "s| ${CMDLINE_ARG}||g" "${GRUB_CONF}"
+  fi
+  if [[ -f "${MKINITCPIO_CONF}" ]]; then
+    sed -i "s| \?${FIRMWARE_VBT}||g" "${MKINITCPIO_CONF}"
+  fi
+
+  detect_bootloader
+  detect_initramfs
+  rebuild
+  echo "Revert complete — reboot to apply."
+}
+
+usage() {
+  echo "Usage: $0 <framerate>"
+  echo "       $0 --revert"
+  exit 1
 }
 
 main() {
@@ -122,18 +198,18 @@ main() {
     return
   fi
 
-  if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <framerate>"
-    echo "       $0 --revert"
-    exit 1
-  fi
+  (( $# == 1 )) || usage
+
+  find_sys_vbt
+  detect_bootloader
+  detect_initramfs
+  echo "Detected: bootloader=${BOOTLOADER}, initramfs=${INITRAMFS}, vbt=${SYS_VBT}"
 
   build_vbt_tool
-  check_environment
   patch_vbt "$1"
-  update_mkinitcpio
+  update_initramfs_conf
   update_cmdline
-  rebuild_initramfs
+  rebuild
 
   echo "Done — reboot to apply. To revert: $0 --revert"
 }

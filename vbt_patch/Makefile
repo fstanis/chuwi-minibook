@@ -1,4 +1,4 @@
-CC = clang
+CC ?= clang
 CFLAGS = -Wall -Wextra -O2
 
 KERNEL_GIT = https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain
