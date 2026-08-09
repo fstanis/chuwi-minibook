@@ -301,18 +301,47 @@ after a VBT `--rotation 3` patch (or `panel_orientation=right`) it becomes
 *"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs its own
 decision at startup (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
 
+**On an encrypted root, use the kernel command line even if your compositor does
+consume orientation events.** The disk passphrase prompt is drawn from the
+initramfs, long before any compositor exists, so a compositor-only arrangement
+leaves it sideways. See [Encrypted boot](#encrypted-boot) below.
+
 #### Kernel command line
 
-Add the `video=` parameter to the kernel command line in `/etc/default/limine`:
+Add the `video=` parameter to the kernel command line in `/etc/default/limine`
+(on GRUB systems, `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`):
 
 ```
-video=DSI-1:panel_orientation=right
+video=DSI-1:panel_orientation=right_side_up
 ```
 
 This tells the i915 DRM driver to apply a hardware rotation, so the console
 framebuffer and all desktop environments see the correct orientation from the
 start -- including the boot splash, TTY consoles and login screen. After
 editing, rebuild the initramfs with `sudo limine-mkinitcpio` and reboot.
+
+The value must be one of `normal`, `upside_down`, `left_side_up` or
+`right_side_up`; those are the only four tokens the DRM parser accepts, and
+anything else is silently ignored rather than reported as an error.
+
+#### Encrypted boot
+
+The passphrase prompt for an encrypted root is rendered from the initramfs, so
+it is drawn before any compositor is running and is unaffected by
+iio-sensor-proxy. Only a rotation applied below userspace reaches it:
+
+| Layer | Covers |
+| ----- | ------ |
+| `video=DSI-1:panel_orientation=right_side_up` | Passphrase prompt, boot splash, login screen |
+| `fbcon=rotate:3` | Text consoles, if you drop to a TTY |
+
+On GNOME/Wayland this composes correctly with the patched proxy rather than
+fighting it: mutter folds the panel orientation into the transform it derives
+from the reported orientation, so `right-up` in laptop mode lands on the
+identity transform and tablet mode still rotates live. The "do not combine a
+static rotation with the proxy" warning in [§7](#7-iio-sensor-proxy) applies to
+compositors that treat the reported orientation as absolute; verify on yours
+before assuming either behaviour.
 
 #### Bootloader framebuffer
 
@@ -326,6 +355,20 @@ interface_rotation: 90
 This only affects the Limine boot screen itself. You still need one of the other
 methods for the kernel and desktop. After editing, rebuild with
 `sudo limine-mkinitcpio`.
+
+**Stock GRUB has no equivalent.** Checked against GRUB 2.14: no rotation module
+in any module directory, no `GRUB_*` option, and `gfxterm.mod`, `video.mod` and
+`gfxmenu.mod` contain no rotation or transform strings at all. Nothing on the
+kernel command line reaches the menu either, since it is drawn before the kernel
+loads.
+
+So on GRUB the boot menu stays in the panel's native portrait orientation. That
+is a limitation of the bootloader rather than a law of physics -- rotating it
+means either building a patched GRUB whose `gfxterm` rotates its blits, or
+switching to a bootloader that already supports it, Limine being the obvious
+choice given `interface_rotation` above. Both are a lot of moving parts for a
+screen that `GRUB_TIMEOUT=0` keeps hidden on a normal boot, so the usual answer
+is to leave it sideways.
 
 #### VBT patch
 
