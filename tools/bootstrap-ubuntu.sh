@@ -19,11 +19,16 @@ readonly MODULES=(i2c_designware_spklen goodix_ts minibook_ec dptf_enabler)
 # Rotation is handled by the kernel so that the boot splash and LUKS prompt are
 # upright too; iio-sensor-proxy then reports orientation relative to that.
 readonly CMDLINE_ARGS=(
-  "fbcon=rotate:3"
   "video=DSI-1:panel_orientation=right_side_up"
   "mem_sleep_default=deep"
   "i915.enable_psr=0"
 )
+
+# Text consoles need their own rotation on top of the panel orientation, and
+# fbcon=rotate: on the cmdline is ignored under i915's fbdev emulation -- it
+# leaves fbcon/rotate at 0. Writing rotate_all at runtime does work.
+readonly FBCON_ROTATE=1
+readonly FBCON_TMPFILES="/etc/tmpfiles.d/fbcon-rotate.conf"
 
 readonly APT_PACKAGES=(
   build-essential meson ninja-build pkgconf clang git curl patch
@@ -116,6 +121,15 @@ update_cmdline() {
   else
     echo "    already up to date"
   fi
+
+  rotate_consoles
+}
+
+rotate_consoles() {
+  echo "==> Rotating text consoles"
+  echo "w /sys/class/graphics/fbcon/rotate_all - - - - ${FBCON_ROTATE}" \
+    >"${FBCON_TMPFILES}"
+  systemd-tmpfiles --create "${FBCON_TMPFILES}" || true
 }
 
 main() {
