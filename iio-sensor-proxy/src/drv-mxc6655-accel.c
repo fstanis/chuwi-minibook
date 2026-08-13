@@ -1200,25 +1200,49 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 	}
 }
 
+static void emit_orientation (SensorDevice *sensor_device, gint orient);
+
+/* GNOME rotates only when a reading arrives, and a near-upright display after
+ * unfolding produces none -- so emit landscape rather than wait for the
+ * accelerometer classifier. */
 static void
-set_tablet_mode (DrvData *drv_data, gint mode, float angle)
+force_landscape (SensorDevice *sensor_device)
 {
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	gint orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+
+	drv_data->cur_orient = orient;
+	drv_data->pending_orient = orient;
+	drv_data->orient_debounce = 0;
+	emit_orientation (sensor_device, orient);
+}
+
+static void
+set_tablet_mode (SensorDevice *sensor_device, gint mode, float angle)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+
 	drv_data->mode = mode;
 	g_debug ("%s mode (angle=%.1f)", mode ? "Tablet" : "Laptop", angle);
 	call_ltsm (mode, &drv_data->ltsm_warned);
 	if (drv_data->uinput_fd >= 0)
 		emit_tablet_mode (drv_data->uinput_fd, mode);
+
+	if (mode == 0)
+		force_landscape (sensor_device);
 }
 
 static void
-update_tablet_mode (DrvData *drv_data, float angle)
+update_tablet_mode (SensorDevice *sensor_device, float angle)
 {
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+
 	if (angle > drv_data->tablet_thresh) {
 		drv_data->t_count++;
 		drv_data->l_count = 0;
 		drv_data->n_count = 0;
 		if (drv_data->mode != 1 && drv_data->t_count > GMTR_DEBOUNCE)
-			set_tablet_mode (drv_data, 1, angle);
+			set_tablet_mode (sensor_device, 1, angle);
 	} else if (angle >= drv_data->laptop_thresh) {
 		drv_data->n_count++;
 		drv_data->t_count = 0;
@@ -1228,7 +1252,7 @@ update_tablet_mode (DrvData *drv_data, float angle)
 		drv_data->t_count = 0;
 		drv_data->n_count = 0;
 		if (drv_data->mode != 0 && drv_data->l_count > GMTR_DEBOUNCE)
-			set_tablet_mode (drv_data, 0, angle);
+			set_tablet_mode (sensor_device, 0, angle);
 	}
 }
 
@@ -1255,12 +1279,15 @@ poll_sensors (gpointer user_data)
 		update_orientation_debounce (sensor_device, drv_data, &a1_orient);
 	}
 
-	if (fabsf (a1.y) < GRAVITY_MIN && fabsf (a2.y) < GRAVITY_MIN)
+	/* Gate on the X-Z plane that compute_hinge_angle projects onto, not Y:
+	 * near full fold gravity leaves Y, and those are the large-angle samples. */
+	if (sqrtf (a1.x * a1.x + a1.z * a1.z) < GRAVITY_MIN &&
+	    sqrtf (a2.x * a2.x + a2.z * a2.z) < GRAVITY_MIN)
 		return G_SOURCE_CONTINUE;
 
 	angle = compute_hinge_angle (drv_data, &a1, &a2);
 	g_debug ("Hinge angle: %.1f  mode=%d", angle, drv_data->mode);
-	update_tablet_mode (drv_data, angle);
+	update_tablet_mode (sensor_device, angle);
 
 	return G_SOURCE_CONTINUE;
 }
@@ -1348,16 +1375,26 @@ mxc6655_open (GUdevDevice *device)
 }
 
 static void
-send_initial_reading (SensorDevice *sensor_device)
+emit_orientation (SensorDevice *sensor_device, gint orient)
 {
-	DrvData *drv_data = (DrvData *) sensor_device->priv;
 	AccelReadings readings;
-	gint orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
 
 	build_synthetic_readings (orient, &readings);
 	sensor_device->callback_func (sensor_device,
 				      (gpointer) &readings,
 				      sensor_device->user_data);
+}
+
+static void
+send_current_reading (SensorDevice *sensor_device)
+{
+	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	gint orient = drv_data->cur_orient;
+
+	if (orient < 0)
+		orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+
+	emit_orientation (sensor_device, orient);
 }
 
 static gboolean
@@ -1511,14 +1548,15 @@ mxc6655_set_polling (SensorDevice *sensor_device,
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 
+	/* Without --lazy the timer already runs (want_polling == state), yet the
+	 * proxy holds each Claim reply until a reading is emitted -- so always send
+	 * one, not just on a state change. */
+	if (state)
+		send_current_reading (sensor_device);
+
 	if (drv_data->want_polling == state)
 		return;
 	drv_data->want_polling = state;
-
-	/* Send a first reading so a client's Claim() returns even if the lid is
-	 * closed and the poll timer stays stopped. */
-	if (state)
-		send_initial_reading (sensor_device);
 
 	update_polling_timer (sensor_device);
 }

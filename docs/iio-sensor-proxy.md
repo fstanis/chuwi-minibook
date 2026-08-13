@@ -118,6 +118,11 @@ sample goes through:
    threshold. This removes the need for a separate static rotation fix (kernel
    cmdline, VBT patch, xrandr); see [GUIDE.md](../GUIDE.md#display-rotation).
 
+   Folding back to laptop mode emits the landscape orientation directly, instead
+   of waiting for the accelerometer pipeline to settle. Compositors that only
+   rotate when a reading arrives would stay in the last tablet rotation
+   otherwise.
+
    If a static rotation *is* already applied, the driver reads the DRM
    `panel orientation` property of the DSI connector at startup and subtracts it
    from every reported orientation, so the dynamic and static rotations do not
