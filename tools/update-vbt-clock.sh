@@ -49,7 +49,8 @@ detect_bootloader() {
 }
 
 detect_initramfs() {
-  if command -v mkinitcpio &>/dev/null || command -v limine-mkinitcpio &>/dev/null; then
+  if command -v mkinitcpio &>/dev/null \
+      || command -v limine-mkinitcpio &>/dev/null; then
     INITRAMFS="mkinitcpio"
   elif command -v dracut &>/dev/null; then
     INITRAMFS="dracut"
@@ -92,71 +93,74 @@ patch_vbt() {
 
 update_initramfs_conf() {
   case "${INITRAMFS}" in
-  mkinitcpio)
-    if grep -q "${FIRMWARE_VBT}" "${MKINITCPIO_CONF}"; then
-      return
-    fi
-    if grep -qE '^FILES=\(\)' "${MKINITCPIO_CONF}"; then
-      sed -i "s|^FILES=()|FILES=(${FIRMWARE_VBT})|" "${MKINITCPIO_CONF}"
-    elif grep -qE '^FILES=\(' "${MKINITCPIO_CONF}"; then
-      sed -i "s|^FILES=(\(.*\))|FILES=(\1 ${FIRMWARE_VBT})|" "${MKINITCPIO_CONF}"
-    else
-      echo "FILES=(${FIRMWARE_VBT})" >>"${MKINITCPIO_CONF}"
-    fi
-    echo "Updated ${MKINITCPIO_CONF}"
-    ;;
-  dracut)
-    printf 'install_items+=" %s "\n' "${FIRMWARE_VBT}" >"${DRACUT_CONF}"
-    echo "Wrote ${DRACUT_CONF}"
-    ;;
-  initramfs-tools)
-    # initramfs-tools pulls /lib/firmware in via the stock hooks; nothing to do.
-    ;;
+    mkinitcpio)
+      if grep -qF "${FIRMWARE_VBT}" "${MKINITCPIO_CONF}"; then
+        return
+      fi
+      if grep -qE '^FILES=\(\)' "${MKINITCPIO_CONF}"; then
+        sed -i "s|^FILES=()|FILES=(${FIRMWARE_VBT})|" "${MKINITCPIO_CONF}"
+      elif grep -qE '^FILES=\(' "${MKINITCPIO_CONF}"; then
+        sed -i "s|^FILES=(\(.*\))|FILES=(\1 ${FIRMWARE_VBT})|" \
+          "${MKINITCPIO_CONF}"
+      else
+        echo "FILES=(${FIRMWARE_VBT})" >>"${MKINITCPIO_CONF}"
+      fi
+      echo "Updated ${MKINITCPIO_CONF}"
+      ;;
+    dracut)
+      printf 'install_items+=" %s "\n' "${FIRMWARE_VBT}" >"${DRACUT_CONF}"
+      echo "Wrote ${DRACUT_CONF}"
+      ;;
+    initramfs-tools)
+      # initramfs-tools pulls /lib/firmware in via the stock hooks.
+      ;;
   esac
 }
 
 update_cmdline() {
   case "${BOOTLOADER}" in
-  limine)
-    if grep -q "${CMDLINE_ARG}" "${LIMINE_CONF}"; then
-      return
-    fi
-    if ! grep -qE '^KERNEL_CMDLINE\[default\]' "${LIMINE_CONF}"; then
-      echo "Could not find KERNEL_CMDLINE[default] in ${LIMINE_CONF}" >&2
-      exit 1
-    fi
-    sed -i "/^KERNEL_CMDLINE\[default\]/s|\"$| ${CMDLINE_ARG}\"|" "${LIMINE_CONF}"
-    ;;
-  grub)
-    if grep -q "${CMDLINE_ARG}" "${GRUB_CONF}"; then
-      return
-    fi
-    if ! grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=' "${GRUB_CONF}"; then
-      echo "Could not find GRUB_CMDLINE_LINUX_DEFAULT in ${GRUB_CONF}" >&2
-      exit 1
-    fi
-    sed -i "/^GRUB_CMDLINE_LINUX_DEFAULT=/s|\"$| ${CMDLINE_ARG}\"|" "${GRUB_CONF}"
-    ;;
+    limine)
+      if grep -qF "${CMDLINE_ARG}" "${LIMINE_CONF}"; then
+        return
+      fi
+      if ! grep -qE '^KERNEL_CMDLINE\[default\]' "${LIMINE_CONF}"; then
+        echo "Could not find KERNEL_CMDLINE[default] in ${LIMINE_CONF}" >&2
+        exit 1
+      fi
+      sed -i "/^KERNEL_CMDLINE\[default\]/s|\"$| ${CMDLINE_ARG}\"|" \
+        "${LIMINE_CONF}"
+      ;;
+    grub)
+      if grep -qF "${CMDLINE_ARG}" "${GRUB_CONF}"; then
+        return
+      fi
+      if ! grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=' "${GRUB_CONF}"; then
+        echo "Could not find GRUB_CMDLINE_LINUX_DEFAULT in ${GRUB_CONF}" >&2
+        exit 1
+      fi
+      sed -i "/^GRUB_CMDLINE_LINUX_DEFAULT=/s|\"$| ${CMDLINE_ARG}\"|" \
+        "${GRUB_CONF}"
+      ;;
   esac
   echo "Added ${CMDLINE_ARG} to kernel cmdline (${BOOTLOADER})"
 }
 
 rebuild() {
   case "${INITRAMFS}" in
-  mkinitcpio)
-    if command -v limine-mkinitcpio &>/dev/null; then
-      limine-mkinitcpio
-    else
-      mkinitcpio -P
-    fi
-    ;;
-  dracut | initramfs-tools)
-    if command -v update-initramfs &>/dev/null; then
-      update-initramfs -u -k all
-    else
-      dracut -f --regenerate-all
-    fi
-    ;;
+    mkinitcpio)
+      if command -v limine-mkinitcpio &>/dev/null; then
+        limine-mkinitcpio
+      else
+        mkinitcpio -P
+      fi
+      ;;
+    dracut | initramfs-tools)
+      if command -v update-initramfs &>/dev/null; then
+        update-initramfs -u -k all
+      else
+        dracut -f --regenerate-all
+      fi
+      ;;
   esac
   echo "Initramfs rebuilt"
 

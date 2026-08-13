@@ -64,6 +64,10 @@ instead of `/etc/default/limine`, and rebuild with
 `sudo grub2-mkconfig -o /boot/grub2/grub.cfg && sudo dracut -f` (Fedora) instead
 of `sudo limine-mkinitcpio`.
 
+On Ubuntu and Debian, `sudo tools/bootstrap-ubuntu.sh` runs steps 1-4 and 7
+plus the kernel command line in one idempotent pass. Steps 5-6 (BIOS tweaks and
+thermald) and step 8 (the refresh rate) still need doing by hand.
+
 ### 1. dptf_enabler
 
 Unhides BIOS-gated Intel DPTF devices. Required by thermald.
@@ -183,8 +187,9 @@ becomes a screen rotation depends on your desktop:
 
 The patched proxy reports `right-up` whenever the device is in laptop mode, so
 the compositor applies the 270° portrait correction dynamically and switches to
-live accelerometer rotation in tablet mode. Do **not** combine this with a
-static rotation (kernel cmdline, VBT patch, xrandr script) - they will stack.
+live accelerometer rotation in tablet mode. A static rotation (kernel cmdline,
+VBT patch, xrandr script) no longer stacks with this - the proxy detects and
+subtracts it, see [Display rotation](#display-rotation).
 
 Verify: `monitor-sensor` and tilt the device. See
 [iio-sensor-proxy.md](docs/iio-sensor-proxy.md) for details.
@@ -301,9 +306,10 @@ two no longer stack. If a static rotation is present, laptop mode reports
 `tools/check-status.sh` reports the applied rotation (read straight from the DRM
 `panel orientation` property) on the `panel rotation` line. With no static
 rotation it reads *"normal, no static rotation (laptop mode reports right-up)"*;
-after a VBT `--rotation 3` patch (or `panel_orientation=right`) it becomes
-*"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs its own
-decision at startup (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
+after a VBT `--rotation 3` patch (or `panel_orientation=right_side_up`) it
+becomes *"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs
+its own decision at startup
+(`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
 
 **On an encrypted root, use the kernel command line even if your compositor does
 consume orientation events.** The disk passphrase prompt is drawn from the
@@ -324,9 +330,15 @@ framebuffer and all desktop environments see the correct orientation from the
 start -- including the boot splash, TTY consoles and login screen. After
 editing, rebuild the initramfs with `sudo limine-mkinitcpio` and reboot.
 
-The value must be one of `normal`, `upside_down`, `left_side_up` or
-`right_side_up`; those are the only four tokens the DRM parser accepts, and
-anything else is silently ignored rather than reported as an error.
+The four values the DRM parser recognises are `normal`, `upside_down`,
+`left_side_up` and `right_side_up`. It compares only as many characters as you
+supply, so a shorter `right` also selects `right_side_up` -- incidental
+behaviour worth not relying on, hence the full token above. A value matching
+none of the four discards the **entire** `video=` option, not just the
+orientation, and logs nothing.
+
+Confirm it took with `dmesg | grep panel_orientation`, which on success reports
+`cmdline forces connector DSI-1 panel_orientation to 3`.
 
 #### Encrypted boot
 
@@ -339,13 +351,23 @@ iio-sensor-proxy. Only a rotation applied below userspace reaches it:
 | `video=DSI-1:panel_orientation=right_side_up` | Passphrase prompt, boot splash, login screen |
 | `fbcon=rotate:3` | Text consoles, if you drop to a TTY |
 
-On GNOME/Wayland this composes correctly with the patched proxy rather than
-fighting it: mutter folds the panel orientation into the transform it derives
-from the reported orientation, so `right-up` in laptop mode lands on the
-identity transform and tablet mode still rotates live. The "do not combine a
-static rotation with the proxy" warning in [§7](#7-iio-sensor-proxy) applies to
-compositors that treat the reported orientation as absolute; verify on yours
-before assuming either behaviour.
+This does not fight the patched proxy. As described under
+[Display rotation](#display-rotation) above, the proxy subtracts the DRM
+`panel orientation` from everything it reports, so laptop mode settles on the
+identity transform and tablet mode still rotates live. That subtraction happens
+in the driver rather than the compositor, so it holds whether or not yours
+treats the reported orientation as absolute.
+
+`fbcon=rotate:N` takes precedence over the orientation the console would
+otherwise inherit from `panel_orientation`, and the two do not compose
+additively -- try all four values rather than deriving one. It applies per
+virtual console as each is initialised, so writing
+`/sys/class/graphics/fbcon/rotate_all` at runtime is the equivalent for
+consoles that already exist, and `fbcon/rotate` reads back the current console
+rather than a global. All of this needs
+`CONFIG_FRAMEBUFFER_CONSOLE_ROTATION=y`; without it both the parameter and the
+sysfs writes are accepted and ignored. If the parameter appears to do nothing,
+check that and `/proc/cmdline` before reaching for the runtime write.
 
 #### Bootloader framebuffer
 
