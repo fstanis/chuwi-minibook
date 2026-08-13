@@ -238,7 +238,7 @@ read_panel_orientation (void)
 {
 	for (gint card = 0; card < MAX_DRM_CARD; card++) {
 		g_autofree gchar *path = g_strdup_printf ("/dev/dri/card%d", card);
-		gint fd = open (path, O_RDWR | O_CLOEXEC);
+		gint fd = open (path, O_RDONLY | O_CLOEXEC);
 		gint orient;
 
 		if (fd < 0)
@@ -261,8 +261,14 @@ static gint
 detect_panel_rotation (void)
 {
 	gint drm_orient = read_panel_orientation ();
-	gint deg = panel_orient_degrees (drm_orient);
+	gint deg;
 
+	if (drm_orient == PANEL_ORIENT_UNKNOWN) {
+		g_message ("MXC6655: DRM panel orientation unknown, no compensation");
+		return 0;
+	}
+
+	deg = panel_orient_degrees (drm_orient);
 	g_message ("MXC6655: DRM panel orientation %d, compensating sensor "
 		   "output by %d°, laptop mode reports orientation %d",
 		   drm_orient, deg,
