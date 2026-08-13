@@ -7,6 +7,7 @@ readonly EXPECTED_VENDOR_PREFIX="CHUWI"
 readonly EXPECTED_PRODUCT="MiniBook X"
 readonly EXPECTED_CPU="Intel(R) N150"
 readonly EXPECTED_DRI_PCI="0000:00:02.0"
+readonly DRI_DRIVER="i915"
 readonly STOCK_VBT_CLOCK=1368870
 
 
@@ -128,6 +129,40 @@ check_display() {
   else
     print_warn "display" "no DSI panel found"
   fi
+}
+
+read_drm_panel_orientation() {
+  local out
+  out="$(modetest -M "${DRI_DRIVER}" -c 2>/dev/null || true)"
+  awk '/panel orientation:/ { f = 1 } f && /value:/ { print $2; exit }' \
+    <<< "${out}"
+}
+
+describe_panel_orientation() {
+  local val="$1"
+  case "${val}" in
+    0) echo "normal, no static rotation (laptop mode reports right-up)" ;;
+    1) echo "upside-down/180° (laptop mode reports left)" ;;
+    2) echo "left-side-up/90° (laptop mode reports inverted)" ;;
+    3) echo "right-side-up/270° (laptop mode reports normal)" ;;
+    *) echo "unknown (${val})" ;;
+  esac
+}
+
+check_panel_rotation() {
+  if ! has_cmd modetest; then
+    print_field "panel rotation" "skipped (modetest not found, install libdrm)"
+    return
+  fi
+
+  local val
+  val="$(read_drm_panel_orientation)"
+  if [[ -z "${val}" ]]; then
+    print_warn "panel rotation" "no DRM panel orientation property (try sudo)"
+    return
+  fi
+
+  print_field "panel rotation" "$(describe_panel_orientation "${val}")"
 }
 
 find_dri_device() {
@@ -265,6 +300,7 @@ check_device() {
   check_microcode
   check_bios
   check_display
+  check_panel_rotation
   check_sleep_mode
 }
 

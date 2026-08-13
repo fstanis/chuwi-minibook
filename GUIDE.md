@@ -283,6 +283,19 @@ kernel/firmware side.
 
 Otherwise, pick one of the methods below for a fixed rotation.
 
+**Combining a static rotation with the proxy:** the proxy reads the DRM
+`panel orientation` property at startup and subtracts any statically-applied
+rotation (VBT patch, kernel cmdline, or i915 quirk) from what it reports, so the
+two no longer stack. If a static rotation is present, laptop mode reports
+`normal` instead of `right-up` and tablet-mode readings are de-rotated to match.
+
+`tools/check-status.sh` reports the applied rotation (read straight from the DRM
+`panel orientation` property) on the `panel rotation` line. With no static
+rotation it reads *"normal, no static rotation (laptop mode reports right-up)"*;
+after a VBT `--rotation 3` patch (or `panel_orientation=right`) it becomes
+*"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs its own
+decision at startup (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
+
 #### Kernel command line
 
 Add the `video=` parameter to the kernel command line in `/etc/default/limine`:

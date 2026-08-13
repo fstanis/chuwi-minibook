@@ -8,7 +8,7 @@ config_h_files = configure_file(
   configuration: config_h
 )
 
-deps = [ gio_dep, gudev_dep, mathlib_dep, polkit_gobject_dep ]
+deps = [ gio_dep, gudev_dep, mathlib_dep, polkit_gobject_dep, libdrm_dep ]
 
 if get_option('ssc-support').enabled()
   deps = deps + [ libssc_dep ]

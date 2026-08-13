@@ -117,3 +117,9 @@ sample goes through:
    mode and follows the accelerometer once the lid folds past the tablet
    threshold. This removes the need for a separate static rotation fix (kernel
    cmdline, VBT patch, xrandr); see [GUIDE.md](../GUIDE.md#display-rotation).
+
+   If a static rotation *is* already applied, the driver reads the DRM
+   `panel orientation` property of the DSI connector at startup and subtracts it
+   from every reported orientation, so the dynamic and static rotations do not
+   stack. The detected orientation is logged at startup (`grep 'panel
+   orientation'` in the journal).
