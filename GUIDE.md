@@ -149,6 +149,18 @@ Verify: `journalctl -u thermald | grep minibook`. See
 
 Screen rotation and tablet mode via dual accelerometers.
 
+Requires the `i2c-dev` and `acpi_call` kernel modules. Without `i2c-dev`, the
+MXC6655 driver cannot open `/dev/i2c-*` and the service exits immediately with
+"No sensors or missing kernel drivers for the sensors". `acpi_call` is needed
+for the EC-level keyboard/touchpad toggle in tablet mode (screen rotation
+itself works without it). Load both and make them persistent:
+
+```
+sudo pacman -S acpi_call-dkms   # or your distro's acpi_call package
+sudo modprobe i2c-dev acpi_call
+printf 'i2c-dev\nacpi_call\n' | sudo tee /etc/modules-load.d/iio-sensor-proxy.conf
+```
+
 ```
 cd iio-sensor-proxy
 make && sudo make install
@@ -188,6 +200,34 @@ static rotation (kernel cmdline, VBT patch, xrandr script) - they will stack.
 
 Verify: `monitor-sensor` and tilt the device. See
 [iio-sensor-proxy.md](docs/iio-sensor-proxy.md) for details.
+
+#### On-screen keyboard (tablet mode)
+
+In tablet mode the physical keyboard is disabled at the EC level (see
+[minibook-ec.md](docs/minibook-ec.md#touchpad-and-keyboard)), so text input
+needs an on-screen keyboard. There is no built-in popup-on-focus mechanism on
+Niri (unlike GNOME/KDE) -- wire one up manually with `switch-events`:
+
+```
+yay -S wvkbd-deskintl
+```
+
+Add to a Niri config file (e.g. `~/.config/niri/cfg/switch-events.kdl`):
+
+```
+switch-events {
+    tablet-mode-on {
+        spawn "wvkbd-deskintl"
+    }
+    tablet-mode-off {
+        spawn "pkill" "-x" "wvkbd-deskintl"
+    }
+}
+```
+
+`wvkbd-deskintl` has no dedicated Polish layout, but every diacritic (ą ć ę ł
+ń ó ś ź ż) is reachable through the "Cmp" (Compose) key: tap `Cmp`, then the
+base letter, then pick the accented variant from the popup that appears.
 
 ### 8. VBT patcher (display refresh rate)
 
@@ -350,6 +390,132 @@ xrandr --output DSI-1 --rotate right
 This is a runtime-only change that does not persist across reboots unless added
 to a startup script or xprofile. It does not affect the boot splash, TTY
 consoles or login screen.
+
+#### Login screen (greetd + noctalia-greeter)
+
+None of the methods above reach the login screen -- it runs as its own,
+separate process before your compositor session even starts. SDDM's default
+X11 greeter has no rotation of its own, and getting its Wayland mode working
+is more trouble than it's worth on this panel (see the aside at the end of
+this section). `greetd` + `noctalia-greeter` is the setup that ended up
+working reliably.
+
+**Prerequisite: `seatd`.** Without it, switching VTs between the greeter and
+an already-running Niri session can wedge Niri's DRM output permanently --
+`journalctl` fills with `Page flip commit failed ... Permission denied` and
+the session never recovers (hard reset required). This happens with *any*
+second compositor grabbing a VT (reproduced with Weston, a second Niri
+instance, and noctalia-greeter's own compositor), not just a Niri-vs-Niri
+conflict -- the actual cause is `libseat` falling back to `logind` for seat
+management, which does not hand DRM master back and forth between VTs
+reliably on this hardware. `seatd` is the seat backend Niri prefers and
+fixes this:
+
+```
+sudo usermod -aG seat "$USER"
+sudo usermod -aG seat greeter   # after installing greetd below, so the user exists
+sudo systemctl enable --now seatd
+sudo reboot
+```
+
+Verify both the greeter and your session picked it up (look for backend
+`seatd`, not `logind`):
+
+```
+journalctl -b --no-pager | grep -i "seat opened"
+```
+
+Do this before touching the greeter config below -- it is not
+Wayland-greeter-specific, plain SDDM+Xorg can wedge the same way if anything
+else on the seat needs a VT switch.
+
+**Install `greetd` and `noctalia-greeter`:**
+
+```
+sudo pacman -S greetd noctalia-greeter
+sudo systemctl disable sddm   # if migrating from SDDM
+sudo systemctl enable greetd
+```
+
+`greetd`'s `greeter` system user needs a real home directory -- by default it
+is `/`, and GTK/Qt-based greeters abort (`SIGABRT`) trying to create
+cache/config directories there:
+
+```
+sudo mkdir -p /var/lib/greeter
+sudo chown greeter:greeter /var/lib/greeter
+sudo usermod -d /var/lib/greeter greeter
+```
+
+`/etc/greetd/config.toml`:
+
+```
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/bin/noctalia-greeter-session -- --session niri"
+user = "greeter"
+```
+
+**Rotation and scale** live in `/var/lib/noctalia-greeter/greeter.toml`
+(created automatically, root:greeter-owned, mode `0750` -- edit with `sudo`):
+
+```
+[output]
+transforms = "DSI-1:270"
+scale = 1.25
+```
+
+Both are meant to sync automatically from the Noctalia shell running on your
+desktop session (see `sync.toml` in the same directory) -- set them manually
+here if the sync hasn't happened yet or you don't run Noctalia.
+
+`transforms` (plural) takes a `"<connector>:<value>"` string, `;`-separated
+for multiple outputs (e.g. `"DP-1:normal; HDMI-A-1:270"`). It must be a
+single `[output]` table -- not `[output.DSI-1]` with a singular `transform`
+key, which is silently ignored (no error, the greeter just stays unrotated).
+
+`scale` is different: it's a bare number (`1.25`, not `"DSI-1:1.25"`) and
+applies uniformly to every output -- there is no per-connector equivalent.
+Upstream's own example config also documents a plural `scales` key (per
+connector, same `"name:value"` format as `transforms`), but the packaged
+version at the time of writing (`noctalia-greeter 1.0.0` internally, `1.1.0-1`
+in the CachyOS package) does not recognize it --
+`journalctl -u greetd | grep greeter-config` logs
+`unrecognized key 'output.scales' (ignored)` and silently keeps the
+auto-detected scale (`2` on this panel) instead. Use singular `scale` until
+that lands; check the same log line to confirm your key was actually picked
+up rather than silently ignored either way.
+
+<details>
+<summary>Aside: why not SDDM+Weston, or plain Niri+regreet?</summary>
+
+Both were tried first and worked, technically, but neither was worth keeping:
+
+- **SDDM + Weston**: SDDM's Wayland mode needs a compositor for its
+  `CompositorCommand`. `cage` cannot rotate at all (no CLI flag, and wlroots
+  only exposes the panel-orientation property to compositors that explicitly
+  read it -- cage doesn't). `weston` can, via a `weston.ini` with
+  `transform=rotate-270`, but it's a second, unrelated compositor codebase
+  to configure and keep in sync by hand, and installing it adds a spurious
+  "Weston" entry to session pickers
+  (`/usr/share/wayland-sessions/weston.desktop`, safe to `rm`).
+- **greetd + Niri + regreet**: Niri itself auto-detects the DRM
+  panel-orientation quirk with zero config (same mechanism as the desktop
+  session), which looked ideal -- run Niri as the greeter compositor too.
+  In practice `regreet` (GTK4) needs its own D-Bus session bus or it aborts
+  on startup (wrap it in `dbus-run-session`), and the handoff from the
+  greeter's Niri instance to the real one still shows a brief flash of raw
+  console text during the VT switch -- an inherent property of running two
+  independent compositor processes back to back, not a misconfiguration.
+
+`noctalia-greeter` sidesteps the GTK/D-Bus fragility (it bundles its own
+compositor and handles that internally) at the cost of *not* getting Niri's
+automatic rotation for free -- its compositor is a separate wlroots build,
+so rotation needs the same kind of manual, per-panel config Weston did.
+
+</details>
 
 ### DSI link tearing
 

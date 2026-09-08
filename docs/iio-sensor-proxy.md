@@ -62,12 +62,23 @@ Polling stops while the lid is closed (regardless of `--lazy` or any claim) and
 resumes when it opens; tablet mode is unaffected. The driver logs each
 transition to the journal: `journalctl -u iio-sensor-proxy | grep 'polling'`.
 
-## Runtime requirement
+## Runtime requirements
+
+The `i2c-dev` kernel module must be loaded. The driver finds the two MXC6655
+accelerometers by opening `/dev/i2c-*`, which only exist once `i2c-dev` is
+loaded -- without it, `find_accels()` finds nothing and the service exits
+immediately with "No sensors or missing kernel drivers for the sensors".
 
 The `acpi_call` kernel module must be loaded for tablet mode transitions (the
 driver calls ACPI method `\_SB.ACMK.LTSM` to toggle the keyboard). If
 `acpi_call` is not available, screen rotation still works but tablet mode
-toggling via ACPI is skipped.
+toggling via ACPI is skipped -- `SW_TABLET_MODE` is still emitted via uinput,
+so most compositors still disable keyboard input at the libinput level, just
+not at the EC level.
+
+Neither module is loaded by default on most distros. Load them and add to
+`/etc/modules-load.d/` for them to persist across reboots -- see
+[GUIDE.md](../GUIDE.md#7-iio-sensor-proxy).
 
 ## Verify
 
