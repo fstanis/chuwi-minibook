@@ -13,6 +13,25 @@ readonly STOCK_VBT_CLOCK=1368870
 
 has_cmd() { command -v "$1" &>/dev/null; }
 
+# thermald is commonly installed to /usr/local/sbin (generic `make install`)
+# or /usr/sbin (`make install-arch` via pacman), neither of which is
+# guaranteed to be on a regular user's PATH -- so a bare `command -v thermald`
+# lookup can miss a correctly installed binary. Fall back to known locations.
+find_thermald() {
+  if has_cmd thermald; then
+    command -v thermald
+    return 0
+  fi
+  local candidate
+  for candidate in /usr/local/sbin/thermald /usr/sbin/thermald; do
+    if [[ -x "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 
 module_loaded() {
   [[ -d "/sys/module/$1" ]]
@@ -500,8 +519,12 @@ check_services() {
   echo "--- services ---"
   echo ""
 
-  local thermald_ver iio_ver
-  thermald_ver="$(thermald --version 2>&1 | head -1 || echo "NOT FOUND")"
+  local thermald_ver iio_ver thermald_bin
+  if thermald_bin="$(find_thermald)"; then
+    thermald_ver="$("${thermald_bin}" --version 2>&1 | head -1)"
+  else
+    thermald_ver="NOT FOUND"
+  fi
   check_service "thermald" "${thermald_ver}"
 
   iio_ver="$(read_iio_version)"
