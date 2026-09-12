@@ -1,0 +1,51 @@
+# Maintainer: Grigorii Horos <horosgrisa@gmail.com>
+
+pkgname=goodix_ts-dkms
+pkgver=7.2.0.minibook1  # updated by pkgver()
+pkgrel=1
+pkgdesc='Goodix touchscreen driver for Chuwi MiniBook X with resume fix (DKMS)'
+arch=('any')
+url='https://github.com/fstanis/chuwi-minibook'
+license=('GPL-2.0-only')
+depends=('dkms')
+makedepends=('curl')
+source=()
+
+_source_root="${startdir}/../.."
+_module=goodix_ts
+
+pkgver() {
+  local kver
+  kver="$(uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')"
+  echo "${kver}.minibook1"
+}
+
+prepare() {
+  rm -rf "${srcdir}/build"
+  mkdir -p "${srcdir}/build"
+  cp "${_source_root}/Kbuild" \
+     "${_source_root}/dkms.conf" \
+     "${_source_root}/goodix_resume.patch" \
+     "${_source_root}/goodix_cfg.bin" \
+     "${srcdir}/build/"
+  cd "${srcdir}/build"
+  local kver_mm
+  kver_mm="$(uname -r | grep -oE '^[0-9]+\.[0-9]+')"
+  local base='https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain'
+  local dir='drivers/input/touchscreen'
+  for f in goodix.c goodix.h goodix_fwupload.c; do
+    curl -fsSL -o "${f}" "${base}/${dir}/${f}?h=linux-${kver_mm}.y"
+  done
+  patch -p1 < goodix_resume.patch
+}
+
+package() {
+  local ver
+  ver="$(pkgver)"
+  local destdir="${pkgdir}/usr/src/${_module}-${ver}"
+  install -dm755 "${destdir}"
+  cd "${srcdir}/build"
+  cp Kbuild dkms.conf goodix.c goodix.h goodix_fwupload.c "${destdir}/"
+  sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${ver}\"/" "${destdir}/dkms.conf"
+  install -Dm644 goodix_cfg.bin "${pkgdir}/usr/lib/firmware/goodix_9110_cfg.bin"
+}

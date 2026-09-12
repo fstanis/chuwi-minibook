@@ -1,0 +1,22 @@
+# Maintainer: Grigorii Horos <horosgrisa@gmail.com>
+
+pkgname=i2c_designware_spklen-dkms
+pkgver=1.0
+pkgrel=1
+pkgdesc='I2C DesignWare spike suppression for Intel LPSS controllers on Chuwi MiniBook X (DKMS)'
+arch=('any')
+url='https://github.com/fstanis/chuwi-minibook'
+license=('GPL-2.0-only')
+depends=('dkms')
+source=()
+
+_source_root="${startdir}/../.."
+_module=i2c_designware_spklen
+
+package() {
+  local destdir="${pkgdir}/usr/src/${_module}-${pkgver}"
+  install -dm755 "${destdir}"
+  cp "${_source_root}/Kbuild" "${_source_root}/dkms.conf" \
+     "${_source_root}/i2c_designware_spklen.c" \
+     "${destdir}/"
+}

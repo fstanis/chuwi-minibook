@@ -1,0 +1,22 @@
+# Maintainer: Grigorii Horos <horosgrisa@gmail.com>
+
+pkgname=minibook_ec-dkms
+pkgver=1.0
+pkgrel=1
+pkgdesc='EC platform driver for Chuwi MiniBook X (thermal, keyboard backlight, DKMS)'
+arch=('any')
+url='https://github.com/fstanis/chuwi-minibook'
+license=('GPL-2.0-only')
+depends=('dkms')
+source=()
+
+_source_root="${startdir}/../.."
+_module=minibook_ec
+
+package() {
+  local destdir="${pkgdir}/usr/src/${_module}-${pkgver}"
+  install -dm755 "${destdir}"
+  cp "${_source_root}/Kbuild" "${_source_root}/dkms.conf" \
+     "${_source_root}"/*.c "${_source_root}"/*.h \
+     "${destdir}/"
+}
