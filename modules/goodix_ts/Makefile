@@ -1,7 +1,7 @@
 DKMS_NAME = goodix_ts
 KVER ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 KVER_MM ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+')
-DKMS_VERSION = $(KVER)-minibook1
+DKMS_VERSION = $(KVER).minibook1
 DKMS_DIR = /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
 KERNEL_GIT = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain
 TOUCHSCREEN_DIR = drivers/input/touchscreen
