@@ -2,12 +2,12 @@
 
 pkgname=iio-sensor-proxy
 pkgver=3.9.minibook1
-pkgrel=1
+pkgrel=2
 pkgdesc='IIO accelerometer sensor to input device proxy (Chuwi MiniBook X build)'
 arch=('x86_64')
 url='https://github.com/fstanis/chuwi-minibook'
 license=('GPL-3.0-only')
-depends=('glib2' 'glibc' 'libgcc' 'libgudev' 'libssc' 'polkit')
+depends=('glib2' 'glibc' 'libdrm' 'libgcc' 'libgudev' 'libssc' 'polkit')
 makedepends=('meson' 'ninja' 'gtk-doc' 'docbook-xsl')
 source=()
 
