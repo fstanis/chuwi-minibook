@@ -32,6 +32,12 @@ compile_commands.json:
 	/lib/modules/$(shell uname -r)/build/scripts/clang-tools/gen_compile_commands.py \
 		-d $(CURDIR) -o compile_commands.json
 
+install-arch:
+	cd packaging/arch && makepkg -f
+	-sudo dkms remove -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)" --all 2>/dev/null
+	-sudo rm -rf "$(DKMS_DIR)"
+	sudo pacman -U --noconfirm packaging/arch/$(DKMS_NAME)-dkms-$(DKMS_VERSION)-*.pkg.tar.zst
+
 enable:
 	modprobe "$(DKMS_NAME)"
 	echo "$(DKMS_NAME)" > /etc/modules-load.d/$(DKMS_NAME).conf
@@ -40,4 +46,4 @@ disable:
 	rm -f /etc/modules-load.d/$(DKMS_NAME).conf
 	modprobe -r "$(DKMS_NAME)" 2>/dev/null || true
 
-.PHONY: all install uninstall clean enable disable compile_commands.json
+.PHONY: all install install-arch uninstall clean enable disable compile_commands.json
