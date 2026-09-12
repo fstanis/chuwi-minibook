@@ -19,4 +19,7 @@ package() {
   cp "${_source_root}/Kbuild" "${_source_root}/dkms.conf" \
      "${_source_root}/dptf_enabler.c" \
      "${destdir}/"
+
+  install -Dm644 "${_source_root}/${_module}.conf" \
+    "${pkgdir}/usr/lib/modules-load.d/${_module}.conf"
 }
