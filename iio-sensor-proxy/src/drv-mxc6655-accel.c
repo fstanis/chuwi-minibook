@@ -46,6 +46,10 @@
 #define DRM_PANEL_ORIENT_PROP	"panel orientation"
 #define MAX_DRM_CARD		4
 
+/* Configuration overrides, read from the environment at startup */
+#define ENV_PANEL_ORIENTATION	"MINIBOOK_PANEL_ORIENTATION"
+#define ENV_LAPTOP_ORIENTATION	"MINIBOOK_LAPTOP_ORIENTATION"
+
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
 #define GMTR_TABLET_THRESH	185.0f
 #define GMTR_LAPTOP_THRESH	175.0f
@@ -78,6 +82,28 @@ typedef enum {
 	MXC_ORIENT_INVERTED = 2,
 	MXC_ORIENT_RIGHT    = 3,
 } MxcOrientation;
+
+typedef struct {
+	const gchar *name;
+	gint         value;
+} NameValue;
+
+/* Same names the kernel takes in video=<connector>:panel_orientation= */
+static const NameValue panel_orientations[] = {
+	{ "auto",          PANEL_ORIENT_UNKNOWN },
+	{ "normal",        PANEL_ORIENT_NORMAL },
+	{ "upside_down",   PANEL_ORIENT_BOTTOM_UP },
+	{ "left_side_up",  PANEL_ORIENT_LEFT_UP },
+	{ "right_side_up", PANEL_ORIENT_RIGHT_UP },
+};
+
+/* Same names monitor-sensor prints for an orientation */
+static const NameValue laptop_orientations[] = {
+	{ "normal",    MXC_ORIENT_NORMAL },
+	{ "left-up",   MXC_ORIENT_LEFT },
+	{ "bottom-up", MXC_ORIENT_INVERTED },
+	{ "right-up",  MXC_ORIENT_RIGHT },
+};
 
 typedef struct {
 	/* Median filter for Z axis */
@@ -162,7 +188,62 @@ typedef struct {
 
 	/* Degrees of static panel rotation to compensate for */
 	gint               panel_deg;
+
+	/* Orientation reported whenever the device is not in tablet mode */
+	gint               laptop_orient;
 } DrvData;
+
+static gboolean
+lookup_name (const NameValue *table, guint len, const gchar *name, gint *value)
+{
+	for (guint i = 0; i < len; i++) {
+		if (strcmp (table[i].name, name) != 0)
+			continue;
+		*value = table[i].value;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static gint
+env_value (const gchar *var, const NameValue *table, guint len, gint fallback)
+{
+	const gchar *name = g_getenv (var);
+	gint value;
+
+	if (name == NULL || name[0] == '\0')
+		return fallback;
+
+	if (lookup_name (table, len, name, &value))
+		return value;
+
+	g_warning ("MXC6655: ignoring invalid %s=\"%s\"", var, name);
+	return fallback;
+}
+
+static const gchar *
+lookup_value (const NameValue *table, guint len, gint value)
+{
+	for (guint i = 0; i < len; i++) {
+		if (table[i].value == value)
+			return table[i].name;
+	}
+	return "unknown";
+}
+
+static gint
+configured_panel_orientation (void)
+{
+	return env_value (ENV_PANEL_ORIENTATION, panel_orientations,
+			  G_N_ELEMENTS (panel_orientations), PANEL_ORIENT_UNKNOWN);
+}
+
+static gint
+configured_laptop_orientation (void)
+{
+	return env_value (ENV_LAPTOP_ORIENTATION, laptop_orientations,
+			  G_N_ELEMENTS (laptop_orientations), MXC_ORIENT_RIGHT);
+}
 
 /* Rotation the compositor already applies for a given DRM panel orientation. */
 static gint
@@ -258,23 +339,33 @@ read_panel_orientation (void)
  * own dynamic rotation on top of it.
  */
 static gint
+effective_panel_orientation (void)
+{
+	gint orient = configured_panel_orientation ();
+
+	if (orient != PANEL_ORIENT_UNKNOWN) {
+		g_message ("MXC6655: %s overrides the DRM panel orientation",
+			   ENV_PANEL_ORIENTATION);
+		return orient;
+	}
+	return read_panel_orientation ();
+}
+
+static gint
 detect_panel_rotation (void)
 {
-	gint drm_orient = read_panel_orientation ();
-	gint deg;
+	gint drm_orient = effective_panel_orientation ();
 
 	if (drm_orient == PANEL_ORIENT_UNKNOWN) {
-		g_message ("MXC6655: DRM panel orientation unknown, no compensation");
+		g_message ("MXC6655: panel orientation unknown, no compensation");
 		return 0;
 	}
 
-	deg = panel_orient_degrees (drm_orient);
-	g_message ("MXC6655: DRM panel orientation %d, compensating sensor "
-		   "output by %d°, laptop mode reports orientation %d",
-		   drm_orient, deg,
-		   compose_orientation (MXC_ORIENT_RIGHT, deg));
+	g_message ("MXC6655: panel orientation %s",
+		   lookup_value (panel_orientations,
+				 G_N_ELEMENTS (panel_orientations), drm_orient));
 
-	return deg;
+	return panel_orient_degrees (drm_orient);
 }
 
 static gint
@@ -1177,7 +1268,7 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 		return;
 
 	if (drv_data->mode != 1)
-		new_orient = MXC_ORIENT_RIGHT;
+		new_orient = drv_data->laptop_orient;
 
 	new_orient = compose_orientation (new_orient, drv_data->panel_deg);
 
@@ -1215,7 +1306,8 @@ static void
 force_landscape (SensorDevice *sensor_device)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
-	gint orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+	gint orient = compose_orientation (drv_data->laptop_orient,
+					   drv_data->panel_deg);
 
 	drv_data->cur_orient = orient;
 	drv_data->pending_orient = orient;
@@ -1313,6 +1405,19 @@ mxc6655_discover (GUdevDevice *device)
 
 static void setup_lid_watch (SensorDevice *sensor_device);
 
+static void
+log_orientation_config (DrvData *drv_data)
+{
+	gint laptop = compose_orientation (drv_data->laptop_orient,
+					   drv_data->panel_deg);
+
+	g_message ("MXC6655: compensating sensor output by %d°, laptop mode "
+		   "reports %s",
+		   drv_data->panel_deg,
+		   lookup_value (laptop_orientations,
+				 G_N_ELEMENTS (laptop_orientations), laptop));
+}
+
 static SensorDevice *
 mxc6655_open (GUdevDevice *device)
 {
@@ -1334,6 +1439,8 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->prev_z1 = 1.0f;
 	drv_data->prev_z2 = 1.0f;
 	drv_data->panel_deg = detect_panel_rotation ();
+	drv_data->laptop_orient = configured_laptop_orientation ();
+	log_orientation_config (drv_data);
 
 	/* DSDT GMTR calibration matrices (defaults) */
 	memcpy (drv_data->cal1, (gint8[]){ 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 9);
@@ -1397,8 +1504,10 @@ send_current_reading (SensorDevice *sensor_device)
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 	gint orient = drv_data->cur_orient;
 
-	if (orient < 0)
-		orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+	if (orient < 0) {
+		orient = compose_orientation (drv_data->laptop_orient,
+					      drv_data->panel_deg);
+	}
 
 	emit_orientation (sensor_device, orient);
 }

@@ -142,8 +142,8 @@ describe_panel_orientation() {
   local val="$1"
   case "${val}" in
     0) echo "normal, no static rotation (laptop mode reports right-up)" ;;
-    1) echo "upside-down/180° (laptop mode reports left)" ;;
-    2) echo "left-side-up/90° (laptop mode reports inverted)" ;;
+    1) echo "upside-down/180° (laptop mode reports left-up)" ;;
+    2) echo "left-side-up/90° (laptop mode reports bottom-up)" ;;
     3) echo "right-side-up/270° (laptop mode reports normal)" ;;
     *) echo "unknown (${val})" ;;
   esac

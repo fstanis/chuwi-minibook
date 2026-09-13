@@ -183,8 +183,18 @@ becomes a screen rotation depends on your desktop:
 
 The patched proxy reports `right-up` whenever the device is in laptop mode, so
 the compositor applies the 270° portrait correction dynamically and switches to
-live accelerometer rotation in tablet mode. Do **not** combine this with a
-static rotation (kernel cmdline, VBT patch, xrandr script) - they will stack.
+live accelerometer rotation in tablet mode.
+
+A static rotation applied at the kernel or firmware level (kernel cmdline
+`panel_orientation=`, VBT patch, i915 quirk) can be combined with this: the
+proxy reads the DRM `panel orientation` property at startup and subtracts it
+from what it reports, so the two do not stack. See
+[Display rotation](#display-rotation). If that property does not reflect the
+rotation your panel actually has, set it explicitly with
+`MINIBOOK_PANEL_ORIENTATION` --
+[Orientation overrides](docs/iio-sensor-proxy.md#orientation-overrides). A
+rotation applied by the compositor instead (`xrandr`, `wlr-randr`, the display
+settings panel) is invisible to the proxy and will fight with auto-rotation.
 
 Verify: `monitor-sensor` and tilt the device. See
 [iio-sensor-proxy.md](docs/iio-sensor-proxy.md) for details.
@@ -276,32 +286,39 @@ link tearing.
 
 If your compositor consumes iio-sensor-proxy orientation events (see
 [§7](#7-iio-sensor-proxy) for the per-desktop list), you do not need any of the
-methods below. The patched proxy reports `right-up` in laptop mode so the
-compositor applies the 270° rotation dynamically, and switches to live
-accelerometer rotation in tablet mode. There is nothing to configure on the
-kernel/firmware side.
+methods below for the desktop itself. The patched proxy reports `right-up` in
+laptop mode so the compositor applies the 270° rotation dynamically, and
+switches to live accelerometer rotation in tablet mode.
 
-Otherwise, pick one of the methods below for a fixed rotation.
+You may still want a static rotation for what runs before or outside the
+compositor -- the boot splash, TTY consoles and the login screen -- or you may
+not use a compositor that consumes the events at all. Pick one of the methods
+below, and read **Combining a static rotation with the proxy** if you run both.
 
 **Combining a static rotation with the proxy:** the proxy reads the DRM
 `panel orientation` property at startup and subtracts any statically-applied
 rotation (VBT patch, kernel cmdline, or i915 quirk) from what it reports, so the
 two no longer stack. If a static rotation is present, laptop mode reports
 `normal` instead of `right-up` and tablet-mode readings are de-rotated to match.
+This works for the kernel/firmware methods below, which set the DRM property;
+a rotation applied by the compositor (`xrandr`, `wlr-randr`, display settings)
+does not set it and cannot be compensated for.
 
 `tools/check-status.sh` reports the applied rotation (read straight from the DRM
 `panel orientation` property) on the `panel rotation` line. With no static
 rotation it reads *"normal, no static rotation (laptop mode reports right-up)"*;
-after a VBT `--rotation 3` patch (or `panel_orientation=right`) it becomes
-*"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs its own
-decision at startup (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
+after a VBT `--rotation 1` patch (or `panel_orientation=right_side_up`) it
+becomes *"right-side-up/270° (laptop mode reports normal)"*. The proxy also logs
+its own decision at startup (`journalctl -u iio-sensor-proxy | grep MXC6655`);
+if it gets the orientation wrong, it can be overridden -- see
+[Orientation overrides](docs/iio-sensor-proxy.md#orientation-overrides).
 
 #### Kernel command line
 
 Add the `video=` parameter to the kernel command line in `/etc/default/limine`:
 
 ```
-video=DSI-1:panel_orientation=right
+video=DSI-1:panel_orientation=right_side_up
 ```
 
 This tells the i915 DRM driver to apply a hardware rotation, so the console

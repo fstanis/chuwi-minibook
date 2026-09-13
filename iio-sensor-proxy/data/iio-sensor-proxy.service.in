@@ -5,6 +5,7 @@ Description=IIO Sensor Proxy service
 Type=dbus
 BusName=net.hadess.SensorProxy
 ExecStart=@libexecdir@/iio-sensor-proxy
+EnvironmentFile=-/etc/default/iio-sensor-proxy
 #Uncomment this to enable debug
 #Environment="G_MESSAGES_DEBUG=all"
 

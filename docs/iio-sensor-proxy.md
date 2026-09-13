@@ -56,6 +56,64 @@ Then `sudo systemctl restart iio-sensor-proxy`. The path varies by distro
 (`/usr/lib` on Arch, `/usr/libexec` elsewhere); `systemctl cat
 iio-sensor-proxy` shows the current `ExecStart` to copy.
 
+## Orientation overrides
+
+The driver assumes the MiniBook X panel is mounted in portrait and that no
+static rotation is applied, so in laptop mode it reports `right-up` and lets the
+compositor rotate by 270 degrees. If a static rotation *is* applied it is
+normally detected from DRM (see [How it works](#how-it-works)), but detection
+does not cover every setup. Two environment variables override the defaults:
+
+| Variable                      | Values                                                           | Default    |
+| ----------------------------- | ---------------------------------------------------------------- | ---------- |
+| `MINIBOOK_PANEL_ORIENTATION`  | `auto`, `normal`, `upside_down`, `left_side_up`, `right_side_up` | `auto`     |
+| `MINIBOOK_LAPTOP_ORIENTATION` | `normal`, `left-up`, `bottom-up`, `right-up`                     | `right-up` |
+
+`MINIBOOK_PANEL_ORIENTATION` takes the same values as the kernel's
+`video=<connector>:panel_orientation=` -- copy whatever is on the kernel command
+line. It replaces the DRM-detected panel orientation, and the rotation it
+implies is subtracted from *every* reported orientation, so it shifts laptop
+mode and tablet orientations alike. Use it when the panel is rotated but the DRM
+property does not say so.
+
+`MINIBOOK_LAPTOP_ORIENTATION` takes the orientation names `monitor-sensor`
+prints, and changes only the fixed orientation reported outside tablet mode. It
+is still compensated by the panel orientation, so it is the knob for a laptop
+mode that is wrong while tablet rotations are right.
+
+Invalid values are ignored with a warning in the journal.
+
+Set them in `/etc/default/iio-sensor-proxy` (read by the service, no unit
+editing needed):
+
+```
+MINIBOOK_PANEL_ORIENTATION=right_side_up
+```
+
+Then `sudo systemctl restart iio-sensor-proxy`. If the running unit predates
+this fork and does not read that file (`systemctl cat iio-sensor-proxy` has no
+`EnvironmentFile` line), set them with `sudo systemctl edit iio-sensor-proxy`
+instead:
+
+```
+[Service]
+Environment="MINIBOOK_PANEL_ORIENTATION=right_side_up"
+```
+
+The values in effect are logged at startup:
+
+```
+journalctl -u iio-sensor-proxy | grep MXC6655
+```
+
+```
+MXC6655: panel orientation right_side_up
+MXC6655: compensating sensor output by 270°, laptop mode reports normal
+```
+
+Check that line first: if the panel orientation it prints already matches the
+kernel command line, detection is working and these overrides are not the fix.
+
 ## Lid gating
 
 Polling stops while the lid is closed (regardless of `--lazy` or any claim) and
@@ -111,7 +169,8 @@ sample goes through:
    rapid flickering. The final orientation is fed to iio-sensor-proxy's standard
    callback, which exposes it over D-Bus for desktop auto-rotation.
 
-   Outside tablet mode the classification result is replaced with `right-up`.
+   Outside tablet mode the classification result is replaced with `right-up`
+   (configurable, see [Orientation overrides](#orientation-overrides)).
    The MiniBook X panel is mounted in portrait, so a compositor consuming
    orientation events (e.g. via `iio-niri`) applies a 270° rotation in laptop
    mode and follows the accelerometer once the lid folds past the tablet
@@ -126,5 +185,6 @@ sample goes through:
    If a static rotation *is* already applied, the driver reads the DRM
    `panel orientation` property of the DSI connector at startup and subtracts it
    from every reported orientation, so the dynamic and static rotations do not
-   stack. The detected orientation is logged at startup (`grep 'panel
-   orientation'` in the journal).
+   stack. The detected orientation is logged at startup (`grep MXC6655` in the
+   journal), and can be overridden when detection gets it wrong (see
+   [Orientation overrides](#orientation-overrides)).

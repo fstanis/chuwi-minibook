@@ -44,6 +44,7 @@ make_test_device (gint             cur_orient,
 	drv_data->lid_fd = -1;
 	drv_data->want_polling = TRUE;
 	drv_data->cur_orient = cur_orient;
+	drv_data->laptop_orient = MXC_ORIENT_RIGHT;
 	drv_data->pending_orient = -1;
 
 	sensor_device = g_new0 (SensorDevice, 1);
