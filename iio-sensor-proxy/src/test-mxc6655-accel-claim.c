@@ -98,6 +98,26 @@ test_repeated_claim_unknown_orientation (void)
 	driver_close (sd);
 }
 
+static void
+test_orientation_sensor (void)
+{
+	g_unsetenv (ENV_ORIENTATION_SENSOR);
+	g_assert_cmpint (configured_orientation_source (), ==, 0);
+
+	g_setenv (ENV_ORIENTATION_SENSOR, "base", TRUE);
+	g_assert_cmpint (configured_orientation_source (), ==, 0);
+
+	g_setenv (ENV_ORIENTATION_SENSOR, "display", TRUE);
+	g_assert_cmpint (configured_orientation_source (), ==, 1);
+
+	g_test_expect_message (G_LOG_DOMAIN, G_LOG_LEVEL_WARNING,
+			       "*Ignoring invalid*");
+	g_setenv (ENV_ORIENTATION_SENSOR, "raw2", TRUE);
+	g_assert_cmpint (configured_orientation_source (), ==, 0);
+	g_unsetenv (ENV_ORIENTATION_SENSOR);
+	g_test_assert_expected_messages ();
+}
+
 int
 main (int    argc,
       char **argv)
@@ -108,6 +128,8 @@ main (int    argc,
 			 test_repeated_claim_known_orientation);
 	g_test_add_func ("/mxc6655/repeated-claim-unknown-orientation",
 			 test_repeated_claim_unknown_orientation);
+	g_test_add_func ("/mxc6655/orientation-sensor",
+			 test_orientation_sensor);
 
 	return g_test_run ();
 }
