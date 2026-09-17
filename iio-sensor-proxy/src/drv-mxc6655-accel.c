@@ -551,6 +551,12 @@ load_gmtr (DrvData *drv_data)
 
 	apply_gmtr_values (drv_data, values, count);
 	g_debug ("Loaded %d values from GMTR calibration", count);
+	for (gint i = 0; i < count; i++)
+		g_debug ("GMTR[%d]=%" G_GUINT64_FORMAT, i, values[i]);
+	g_debug ("GMTR applied: tablet=%d laptop=%.0f min=%.0f "
+		 "debounce=%d poll_ms=%d",
+		 drv_data->tablet_thresh, drv_data->laptop_thresh,
+		 drv_data->min_angle, drv_data->debounce, drv_data->poll_ms);
 	return TRUE;
 }
 
@@ -789,8 +795,11 @@ orientation_filter_settled (OrientState *s, const Vec3 *accel)
 	else if (s->quiet_count < ORIENT_STABLE_MIN)
 		s->quiet_count++;
 
-	if (s->quiet_count < ORIENT_STABLE_MIN)
+	if (s->quiet_count < ORIENT_STABLE_MIN) {
+		g_debug ("settle: warming up var=%.5f quiet=%d primed=%d",
+			 max_var, s->quiet_count, s->primed);
 		return s->primed;
+	}
 
 	for (gint i = 0; i < ORIENT_BUF_SIZE; i++)
 		avg_z += s->buf_z[i];
@@ -800,12 +809,16 @@ orientation_filter_settled (OrientState *s, const Vec3 *accel)
 		s->ref_z = avg_z;
 		s->have_ref = TRUE;
 	} else if (fabsf (avg_z - s->ref_z) > ORIENT_JUMP_LIMIT) {
+		g_debug ("settle: z jump %.3f -> %.3f, suppressing one sample",
+			 s->ref_z, avg_z);
 		s->have_ref = FALSE;
 		return FALSE;
 	} else {
 		s->ref_z = avg_z;
 	}
 
+	if (!s->primed)
+		g_debug ("settle: primed (avg_z=%.3f)", avg_z);
 	s->primed = TRUE;
 	return TRUE;
 }
@@ -868,6 +881,8 @@ compute_hinge_angle (DrvData *drv_data, const Vec3 *cal1, const Vec3 *cal2)
 
 	diff = ang1 - ang2;
 	if (ang1 < ang2) diff += 360.0f;
+	g_debug ("hinge parts: ang1=%.2f ang2=%.2f v1=%.3f v2=%.3f "
+		 "z1=%.3f z2=%.3f", ang1, ang2, v1, v2, a1z, a2z);
 
 	return diff;
 }
@@ -951,8 +966,15 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 		return;
 
 	new_orient = classify_orientation (accel);
-	if (new_orient < 0)
+	if (new_orient < 0) {
+		g_debug ("classify: undetermined (x=%.2f y=%.2f)",
+			 accel->x, accel->y);
 		return;
+	}
+	g_debug ("classify: %d (x=%.2f y=%.2f) mode=%d pending=%d cur=%d deb=%d",
+		 new_orient, accel->x, accel->y, drv_data->mode,
+		 drv_data->pending_orient, drv_data->cur_orient,
+		 drv_data->orient_debounce);
 
 	if (drv_data->mode != 1)
 		new_orient = MXC_ORIENT_RIGHT;
@@ -998,6 +1020,7 @@ force_landscape (SensorDevice *sensor_device)
 	drv_data->cur_orient = orient;
 	drv_data->pending_orient = orient;
 	drv_data->orient_debounce = 0;
+	g_debug ("force_landscape: emitting orientation %d", orient);
 	emit_orientation (sensor_device, orient);
 }
 
@@ -1005,10 +1028,13 @@ static void
 set_tablet_mode (SensorDevice *sensor_device, gint mode, float angle)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
+	gint ltsm_ret;
 
+	ltsm_ret = call_ltsm (mode, &drv_data->ltsm_warned);
 	drv_data->mode = mode;
-	g_debug ("%s mode (angle=%.1f)", mode ? "Tablet" : "Laptop", angle);
-	call_ltsm (mode, &drv_data->ltsm_warned);
+	g_debug ("%s mode (angle=%.1f) ltsm=%d uinput_fd=%d",
+		 mode ? "Tablet" : "Laptop", angle, ltsm_ret,
+		 drv_data->uinput_fd);
 	if (drv_data->uinput_fd >= 0)
 		emit_tablet_mode (drv_data->uinput_fd, mode);
 
@@ -1062,6 +1088,10 @@ poll_sensors (gpointer user_data)
 
 	a1 = calibrate (&raw1, drv_data->cal1);
 	a2 = calibrate (&raw2, drv_data->cal2);
+	g_debug ("sample: raw1=(%.3f,%.3f,%.3f) raw2=(%.3f,%.3f,%.3f) "
+		 "cal1=(%.3f,%.3f,%.3f) cal2=(%.3f,%.3f,%.3f) rotation=%d",
+		 raw1.x, raw1.y, raw1.z, raw2.x, raw2.y, raw2.z,
+		 a1.x, a1.y, a1.z, a2.x, a2.y, a2.z, drv_data->rotation_idx);
 
 	{
 		Vec3 orient = drv_data->rotation_idx == 0 ? raw1 : raw2;
@@ -1072,16 +1102,25 @@ poll_sensors (gpointer user_data)
 	/* Suppress single-sample spikes on the Z axis both angle inputs use */
 	a1.z = median3_step (&drv_data->hinge_median[0], a1.z);
 	a2.z = median3_step (&drv_data->hinge_median[1], a2.z);
+	g_debug ("hinge median: z1=%.3f z2=%.3f", a1.z, a2.z);
 
 	/* Both sensors' Y axes point along the hinge, so gravity on Y means the
 	 * hinge is far from horizontal and the X-Z projection the angle is
 	 * computed from is no longer meaningful. Windows abstains unless both
 	 * stay below 0.9 (~64 degrees of hinge tilt). */
-	if (fabsf (a1.y) > HINGE_AXIS_MAX || fabsf (a2.y) > HINGE_AXIS_MAX)
+	if (fabsf (a1.y) > HINGE_AXIS_MAX || fabsf (a2.y) > HINGE_AXIS_MAX) {
+		g_debug ("hinge gate: |y1|=%.3f |y2|=%.3f over %.2f, skipping",
+			 fabsf (a1.y), fabsf (a2.y), HINGE_AXIS_MAX);
 		return G_SOURCE_CONTINUE;
+	}
 
 	angle = compute_hinge_angle (drv_data, &a1, &a2);
-	g_debug ("Hinge angle: %.1f  mode=%d", angle, drv_data->mode);
+	g_debug ("angle=%.2f mode=%d t=%d l=%d n=%d "
+		 "(thresh %d/%.0f/%.0f debounce %d)",
+		 angle, drv_data->mode, drv_data->t_count, drv_data->l_count,
+		 drv_data->n_count, drv_data->tablet_thresh,
+		 drv_data->laptop_thresh, drv_data->min_angle,
+		 drv_data->debounce);
 	update_tablet_mode (sensor_device, angle);
 
 	return G_SOURCE_CONTINUE;
@@ -1185,6 +1224,7 @@ emit_orientation (SensorDevice *sensor_device, gint orient)
 {
 	AccelReadings readings;
 
+	g_debug ("emitting orientation %d", orient);
 	build_synthetic_readings (orient, &readings);
 	sensor_device->callback_func (sensor_device,
 				      (gpointer) &readings,
@@ -1200,6 +1240,8 @@ send_current_reading (SensorDevice *sensor_device)
 	if (orient < 0)
 		orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
 
+	g_debug ("send_current_reading: orientation %d (cur=%d)",
+		 orient, drv_data->cur_orient);
 	emit_orientation (sensor_device, orient);
 }
 
