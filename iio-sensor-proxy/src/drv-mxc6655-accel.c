@@ -30,6 +30,7 @@
 #define MXC6655_REG_XOUT	0x03	/* 6 bytes: XH,XL,YH,YL,ZH,ZL */
 #define MXC6655_REG_TOUT	0x09	/* temperature, 0 at 25C, 0.586C/LSB */
 #define MXC6655_REG_DEVID	0x0E
+#define MXC6655_REG_WHO_AM_I	0x0F
 
 #define ACPI_CALL_PATH		"/proc/acpi/call"
 #define ACPI_LTSM_CMD		"\\_SB.ACMK.LTSM"
@@ -728,6 +729,20 @@ resolve_rotation_sensor (DrvData *drv_data, gchar *const controllers[2])
 		g_free (sources[i]);
 }
 
+static void
+log_chip_ids (const gint fds[2])
+{
+	for (gint i = 0; i < 2; i++) {
+		guint8 who = 0xff;
+		guint8 reg0e = 0xff;
+
+		i2c_xfer (fds[i], MXC6655_REG_WHO_AM_I, &who, 1);
+		i2c_xfer (fds[i], MXC6655_REG_DEVID, &reg0e, 1);
+		g_debug ("sensor %d: who_am_i(0x0F)=0x%02x reg(0x0E)=0x%02x",
+			 i, who, reg0e);
+	}
+}
+
 static gint
 setup_uinput (void)
 {
@@ -1288,6 +1303,7 @@ mxc6655_open (GUdevDevice *device)
 	}
 
 	resolve_rotation_sensor (drv_data, controllers);
+	log_chip_ids (drv_data->i2c_fds);
 	g_free (controllers[0]);
 	g_free (controllers[1]);
 
