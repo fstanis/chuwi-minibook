@@ -16,6 +16,9 @@ the stock kernel cannot reach. Once loaded, it provides:
 - **EC version** -- read the embedded controller firmware version.
 - **BIOS unlock** -- expose hidden BIOS menus on the next reboot into setup
   (one-shot, cleared after use).
+- **ACPI accelerometer methods** -- raw access to the `ACMK` firmware methods
+  the orientation driver needs: `gmtr` (calibration blob) and `crs` (sensor
+  resource order) as binary attributes.
 
 Most of these integrate with standard Linux subsystems, so you rarely need to
 access them directly: thermal sensors show up in `sensors` (`lm-sensors`), the
@@ -74,6 +77,19 @@ echo 1 | sudo tee /sys/devices/platform/minibook_ec/touchpad_enabled
 
 `keyboard_enabled` works the same way. Setting it to `0` puts the device in
 slate mode (keyboard off), `1` restores laptop mode.
+
+### ACPI accelerometer methods
+
+```
+# calibration blob: 24 raw bytes (two 3x3 matrices, thresholds, rates)
+cat /sys/devices/platform/minibook_ec/gmtr | xxd
+
+# raw _CRS buffer, lists the I2C resources (first = orientation sensor)
+cat /sys/devices/platform/minibook_ec/crs | xxd
+```
+
+These exist so the patched [iio-sensor-proxy](iio-sensor-proxy.md) can read
+firmware data without the out-of-tree `acpi_call` module.
 
 ### Keyboard backlight
 

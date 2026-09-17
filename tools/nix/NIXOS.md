@@ -43,14 +43,17 @@ Importing the module enables:
 - tablet mode and automatic screen rotation
 - MiniBook thermald
 - the Panel Self Refresh workaround
-- kernel panel rotation
 - MiniBook diagnostic tools
 
-VBT changes and the Mutter patch are opt-in.
+Kernel panel rotation, VBT changes and the Mutter patch are opt-in.
 
 ## Display rotation
 
-The default is correct for the MiniBook X:
+The proxy reports laptop orientation automatically and follows the display
+accelerometer in tablet mode. Leave static rotation disabled for rotation
+bridges such as iio-niri; see [desktop integration](../../docs/iio-sensor-proxy.md#desktop-integration).
+
+To opt into kernel panel rotation for the boot splash or encrypted-root prompt:
 
 ```nix
 hardware.chuwi-minibook.kernelPanelOrientation = {
@@ -80,12 +83,10 @@ Add it to your Git flake:
 git add firmware/source-vbt.bin
 ```
 
-To use 60 Hz with kernel rotation:
+To use 60 Hz:
 
 ```nix
 hardware.chuwi-minibook = {
-  kernelPanelOrientation.enable = true;
-
   vbt = {
     enable = true;
     source = ./firmware/source-vbt.bin;
@@ -105,7 +106,8 @@ hardware.chuwi-minibook.vbt.enable = false;
 
 ## VBT rotation
 
-Kernel rotation is the recommended method. To use VBT rotation instead:
+Leave VBT rotation unset when using dynamic rotation. To opt into static
+VBT rotation instead of kernel panel rotation:
 
 ```nix
 hardware.chuwi-minibook = {
@@ -133,19 +135,15 @@ The values describe how the panel is mounted.
 
 ## GNOME and Mutter
 
-Use these settings together on GNOME:
+To enable the optional Mutter tablet-exit rotation patch:
 
 ```nix
 hardware.chuwi-minibook = {
-  sensorProxy.panelOrientation = "normal";
   mutter.enable = true;
 };
 ```
 
-- `panelOrientation = "normal"` gives Mutter correctly aligned SensorProxy
-  readings during tablet rotation.
-- `mutter.enable = true` returns the display to the correct direction when
-  leaving tablet mode.
+The patch addresses the display direction when leaving tablet mode.
 
 The first build takes longer because it rebuilds Mutter.
 
@@ -157,22 +155,20 @@ The defaults are:
 hardware.chuwi-minibook.sensorProxy = {
   enable = true;
   setConvertibleChassis = true;
-  panelOrientation = "auto";
-  laptopOrientation = "right-up";
-  orientationSensor = "base";
 };
 ```
 
-Settings:
+`setConvertibleChassis` identifies the MiniBook X as a convertible.
 
-- `panelOrientation`: static panel orientation used by SensorProxy.
-- `laptopOrientation`: orientation reported in laptop mode.
-- `orientationSensor`: `base` or `display` accelerometer for screen rotation.
-- `setConvertibleChassis`: identify the MiniBook X as a convertible.
+SensorProxy requires `minibookEc.enable = true` for firmware calibration,
+orientation sensor selection and keyboard toggling. The driver detects panel
+orientation through DRM and selects the accelerometer through ACPI `_CRS`.
+Laptop orientation is fixed to `right-up` before panel compensation.
 
 ## Components
 
-Set any switch to `false` to disable that part.
+Set a switch to `false` to disable that part. Disable SensorProxy as well
+when disabling `minibookEc`.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -184,7 +180,7 @@ Set any switch to `false` to disable that part.
 | `sensorProxy.enable` | `true` | Tablet mode and screen rotation |
 | `sensorProxy.setConvertibleChassis` | `true` | Convertible chassis classification |
 | `thermald.enable` | `true` | MiniBook thermald service |
-| `kernelPanelOrientation.enable` | `true` | Kernel display rotation |
+| `kernelPanelOrientation.enable` | `false` | Kernel display rotation |
 | `vbt.enable` | `false` | Custom VBT |
 | `disablePanelSelfRefresh` | `true` | Display corruption workaround |
 | `mutter.enable` | `false` | Mutter tablet-exit rotation fix |

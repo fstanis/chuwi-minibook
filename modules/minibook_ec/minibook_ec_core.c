@@ -5,6 +5,7 @@
  * Exposes:
  *   - Touchpad toggle and keyboard/tablet mode (sysfs)
  *   - EC firmware version and BIOS menu unlock (sysfs)
+ *   - ACMK accelerometer methods as binary attributes (gmtr, crs)
  *   - SoC temperature as a thermal zone (EC register 0x70)
  *   - Fan RPM and PWM duty cycle as hwmon (IT5570E PWM module, I2EC)
  */
@@ -47,6 +48,11 @@ static int minibook_ec_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to register sysfs attrs\n");
+
+	ret = minibook_ec_register_acpi(ec);
+	if (ret < 0)
+		dev_warn(&pdev->dev, "ACMK attributes not available (%d)\n",
+			 ret);
 
 	ret = minibook_ec_i2ec_init(ec);
 	if (ret < 0)

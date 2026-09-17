@@ -44,6 +44,8 @@ struct minibook_ec {
 
 int minibook_ec_register_sysfs(struct minibook_ec *ec);
 
+int minibook_ec_register_acpi(struct minibook_ec *ec);
+
 int minibook_ec_register_thermal(struct minibook_ec *ec);
 void minibook_ec_unregister_thermal(struct minibook_ec *ec);
 

@@ -1,9 +1,9 @@
 /*
  * MXC6655 dual-accelerometer driver for CHUWI MiniBook.
  * Reads two MXC6655 accelerometers via raw I2C, computes hinge angle
- * for tablet mode detection, and provides orientation via a multi-stage
- * filter pipeline. Tablet mode transitions are emitted via uinput
- * (SW_TABLET_MODE) and ACPI.
+ * for tablet mode detection, and provides orientation through a
+ * settle-gated classifier. Tablet mode transitions are emitted via
+ * uinput (SW_TABLET_MODE) and ACPI.
  */
 
 #include "drivers.h"
@@ -11,7 +11,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
-#include <errno.h>
 #include <math.h>
 #include <sys/ioctl.h>
 
@@ -28,9 +27,12 @@
 #define MXC6655_REG_XOUT	0x03	/* 6 bytes: XH,XL,YH,YL,ZH,ZL */
 #define MXC6655_REG_DEVID	0x0E
 
-#define ACPI_CALL_PATH		"/proc/acpi/call"
-#define ACPI_LTSM_CMD		"\\_SB.ACMK.LTSM"
 #define ACPI_MATCH_ID		"MDA6655"
+
+#define MINIBOOK_EC_SYSFS	"/sys/devices/platform/minibook_ec"
+#define LTSM_SYSFS		MINIBOOK_EC_SYSFS "/keyboard_enabled"
+#define GMTR_SYSFS		MINIBOOK_EC_SYSFS "/gmtr"
+#define CRS_SYSFS		MINIBOOK_EC_SYSFS "/crs"
 #define I2C_UNBIND_DRIVER	"mxc4005"
 #define MAX_I2C_BUS		20
 #define MAX_INPUT_DEV		32
@@ -46,8 +48,6 @@
 #define DRM_PANEL_ORIENT_PROP	"panel orientation"
 #define MAX_DRM_CARD		4
 
-#define ENV_ORIENTATION_SENSOR	"MINIBOOK_ORIENTATION_SENSOR"
-
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
 #define GMTR_TABLET_THRESH	185.0f
 #define GMTR_LAPTOP_THRESH	175.0f
@@ -55,24 +55,25 @@
 #define GMTR_DEBOUNCE		5
 #define GMTR_POLL_MS		50
 
-#define GRAVITY_MIN		0.3f
+/* Both sensors' Y axes point along the hinge; past this the X-Z plane the
+ * hinge angle is computed from no longer carries enough of gravity. */
+#define HINGE_AXIS_MAX		0.9f
 
-/* Multi-stage orientation filter constants */
+/* Orientation settle-filter constants */
 #define ORIENT_BUF_SIZE		20
-#define ORIENT_OFFSET_BUF	5
 #define ORIENT_VARIANCE_THRESH	0.01f
 #define ORIENT_STABLE_MIN	10
-#define ORIENT_EMA_ALPHA	0.01f
-#define ORIENT_EMA_DECAY	0.99f
-#define ORIENT_DRIFT_LIMIT	0.2f
 #define ORIENT_JUMP_LIMIT	2.4f
-#define ORIENT_OUTLIER_RANGE	0.5f
-#define ORIENT_MAG_LO		0.85f
-#define ORIENT_MAG_HI		1.15f
 
 typedef struct {
 	float x, y, z;
 } Vec3;
+
+/* Median-of-3 spike suppressor for the hinge-angle Z inputs */
+typedef struct {
+	float	buf[3];
+	gint	count;
+} MedianFilter;
 
 typedef enum {
 	MXC_ORIENT_NORMAL   = 0,
@@ -86,11 +87,6 @@ typedef struct {
 	float              z_median_buf[3];
 	gint               z_median_count;
 
-	/* EMA filters per axis [x=0, y=1, z=2] */
-	float              ema_delta[3];
-	float              ema_abs_delta[3];
-	float              smoothed[3];
-
 	/* Circular buffer for stability detection */
 	float              buf_x[ORIENT_BUF_SIZE];
 	float              buf_y[ORIENT_BUF_SIZE];
@@ -98,33 +94,13 @@ typedef struct {
 	gint               buf_idx;
 	gint               buf_full;
 
-	/* Accumulator for long-term stability */
-	gint               stable_count;
-	float              acc_x, acc_y, acc_z;
-	float              acc_sq_x, acc_sq_y, acc_sq_z;
-	float              peak_x, peak_y, peak_z;
-	float              trough_x, trough_y, trough_z;
-	gint               outlier_detected;
+	/* Consecutive quiet samples before classification is allowed */
+	gint               quiet_count;
 
-	/* Reference gravity point */
-	float              ref_x, ref_y, ref_z;
-
-	/* Z direction: 1=positive, -1=negative, 0=unknown */
-	gint               z_dir;
-
-	/* Gravity offset tracking */
-	float              gravity_offset;
-	float              trimmed_mean;
-
-	/* Offset buffer (trimmed mean) */
-	float              offset_buf[ORIENT_OFFSET_BUF];
-	gint               offset_count;
-	gint               offset_init;
-
-	/* Output */
-	float              out_offset;
-	float              out_mean;
-	float              out_z;
+	/* Z-jump detection */
+	float              ref_z;
+	gboolean           have_ref;
+	gboolean           primed;
 } OrientState;
 
 typedef struct {
@@ -135,7 +111,6 @@ typedef struct {
 	guint              lid_watch_id;
 	gint               i2c_fds[2];
 	gint               uinput_fd;
-	gint               ltsm_warned;
 
 	/* Calibration matrices from DSDT GMTR */
 	gint8              cal1[9];
@@ -145,6 +120,9 @@ typedef struct {
 	float              prev_z1;
 	float              prev_z2;
 
+	/* Median filters for the hinge-angle Z inputs */
+	MedianFilter       hinge_median[2];
+
 	/* Tablet mode state machine */
 	gint               mode;
 	gint               t_count;
@@ -152,9 +130,11 @@ typedef struct {
 	gint               n_count;
 
 	/* Dynamic thresholds from DSDT GMTR */
-	float              tablet_thresh;
+	gint               tablet_thresh;
 	float              laptop_thresh;
 	float              min_angle;
+	gint               debounce;
+	gint               poll_ms;
 
 	/* Orientation state */
 	OrientState        orient;
@@ -165,23 +145,10 @@ typedef struct {
 	/* Degrees of static panel rotation to compensate for */
 	gint               panel_deg;
 
-	/* Raw accelerometer used for orientation */
-	gint               orientation_source;
+	/* Raw accelerometer used for orientation (ACPI _CRS slot 1) */
+	gint               rotation_idx;
+	gchar             *rotation_controller;
 } DrvData;
-
-static gint
-configured_orientation_source (void)
-{
-	const gchar *value = g_getenv (ENV_ORIENTATION_SENSOR);
-
-	if (value == NULL || *value == '\0' || g_str_equal (value, "base"))
-		return 0;
-	if (g_str_equal (value, "display"))
-		return 1;
-
-	g_warning ("Ignoring invalid %s=%s", ENV_ORIENTATION_SENSOR, value);
-	return 0;
-}
 
 /* Rotation the compositor already applies for a given DRM panel orientation. */
 static gint
@@ -313,14 +280,24 @@ static gint
 read_accel (gint fd, Vec3 *v)
 {
 	guint8 buf[6];
+	float scale = 0.00024414063f;
+	float mag;
 
 	if (i2c_xfer (fd, MXC6655_REG_XOUT, buf, 6) < 0)
 		return -1;
 
-	float scale = 0.00024414063f;
 	v->x = (float)(gint)(gint16)((buf[0] << 8) | buf[1]) * scale;
 	v->y = (float)(gint)(gint16)((buf[2] << 8) | buf[3]) * scale;
 	v->z = (float)(gint)(gint16)((buf[4] << 8) | buf[5]) * scale;
+
+	/* The chips come up in an unknown full-scale range and read several
+	 * times gravity; every consumer is directional, so normalize. */
+	mag = sqrtf (v->x * v->x + v->y * v->y + v->z * v->z);
+	if (mag >= 0.1f && mag <= 8.0f) {
+		v->x /= mag;
+		v->y /= mag;
+		v->z /= mag;
+	}
 	return 0;
 }
 
@@ -354,7 +331,7 @@ probe_bus (gint bus)
 }
 
 static gint
-find_accels (gint fds[2])
+find_accels (gint fds[2], gchar *controllers[2])
 {
 	gint found = 0;
 	GUdevClient *client;
@@ -378,7 +355,9 @@ find_accels (gint fds[2])
 		fd = probe_bus (bus);
 		if (fd >= 0) {
 			g_debug ("MXC6655 found on %s (%s)", name, acpi_path);
-			fds[found++] = fd;
+			fds[found] = fd;
+			controllers[found] = g_strdup (acpi_path);
+			found++;
 		}
 	}
 
@@ -416,78 +395,32 @@ try_unbind (void)
 	usleep (200000);
 }
 
+/* LTSM(1) is slate mode (keyboard off); keyboard_enabled is the inverse. */
 static gint
-call_ltsm (gint mode, gboolean *warned)
+call_ltsm (gint mode)
 {
-	gint fd;
-	g_autofree char *cmd = NULL;
-	gint ret;
+	gint fd, ret;
 
-	fd = open (ACPI_CALL_PATH, O_WRONLY | O_CLOEXEC);
-	if (fd < 0) {
-		if (!*warned) {
-			g_warning ("Cannot open %s: %s", ACPI_CALL_PATH, g_strerror (errno));
-			*warned = TRUE;
-		}
-		return -1;
-	}
-	cmd = g_strdup_printf ("%s %d", ACPI_LTSM_CMD, mode);
-	ret = write (fd, cmd, strlen (cmd));
-	close (fd);
-	return ret > 0 ? 0 : -1;
-}
-
-#define ACPI_GMTR_CMD		"\\_SB.ACMK.GMTR"
-
-static ssize_t
-acpi_call_read (const gchar *cmd, gchar *buf, gsize buf_size)
-{
-	gint fd;
-	ssize_t len;
-
-	fd = open (ACPI_CALL_PATH, O_RDWR | O_CLOEXEC);
+	fd = open (LTSM_SYSFS, O_WRONLY | O_CLOEXEC);
 	if (fd < 0)
 		return -1;
 
-	if (write (fd, cmd, strlen (cmd)) < 0) {
-		close (fd);
-		return -1;
-	}
-
-	len = read (fd, buf, buf_size - 1);
+	ret = write (fd, mode == 0 ? "1" : "0", 1);
 	close (fd);
-
-	if (len <= 0)
-		return -1;
-
-	buf[len] = '\0';
-	return len;
+	return ret == 1 ? 0 : -1;
 }
 
 static gint
-parse_acpi_package (const gchar *buf, guint64 *values, gint max_values)
+read_sysfs_bytes (const gchar *path, guint8 *buf, gint max)
 {
-	gchar **elements;
-	gchar *end;
-	g_autofree gchar *copy = NULL;
-	gint count = 0;
+	gint fd, len;
 
-	if (buf[0] != '{')
-		return 0;
-
-	copy = g_strdup (buf + 1);
-	end = strchr (copy, '}');
-	if (end)
-		*end = '\0';
-
-	elements = g_strsplit (copy, ", ", -1);
-	for (gint i = 0; elements[i] != NULL && count < max_values; i++) {
-		if (strlen (elements[i]) == 0)
-			continue;
-		values[count++] = g_ascii_strtoull (elements[i], NULL, 0);
-	}
-	g_strfreev (elements);
-	return count;
+	fd = open (path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	len = (gint) read (fd, buf, max);
+	close (fd);
+	return len > 0 ? len : -1;
 }
 
 static void
@@ -505,31 +438,159 @@ apply_gmtr_values (DrvData *drv_data, const guint64 *values, gint count)
 		drv_data->laptop_thresh = (float) values[19];
 	if (count > 20 && values[20] > 0)
 		drv_data->min_angle = (float) values[20];
+	if (count > 21 && values[21] > 0)
+		drv_data->debounce = (gint) values[21];
+	if (count > 22) {
+		guint64 rate = values[22] & 0xff;
+
+		drv_data->poll_ms = rate == 0 ? 100 : (gint) (1000 / rate);
+		drv_data->poll_ms = CLAMP (drv_data->poll_ms, 10, 1000);
+	}
+	if (count > 23)
+		g_debug ("GMTR axis mode %d, gate config %d",
+			 (gint) (values[23] & 0xf),
+			 (gint) ((values[23] >> 4) & 0xf));
 }
 
-static gboolean
+static void
 load_gmtr (DrvData *drv_data)
 {
-	gchar buf[4096];
+	guint8 bytes[512];
 	guint64 values[32];
-	gint count;
+	gint len;
 
 	drv_data->tablet_thresh = GMTR_TABLET_THRESH;
 	drv_data->laptop_thresh = GMTR_LAPTOP_THRESH;
 	drv_data->min_angle = GMTR_MIN_ANGLE;
+	drv_data->debounce = GMTR_DEBOUNCE;
+	drv_data->poll_ms = GMTR_POLL_MS;
 
-	if (acpi_call_read (ACPI_GMTR_CMD, buf, sizeof (buf)) < 0)
-		return FALSE;
+	len = read_sysfs_bytes (GMTR_SYSFS, bytes, sizeof (bytes));
+	if (len < 18) {
+		g_warning ("Cannot read %s (is the minibook_ec module loaded?); "
+			   "using defaults: tablet %d, laptop %.0f, min %.0f, "
+			   "debounce %d, poll %d ms",
+			   GMTR_SYSFS, (gint) GMTR_TABLET_THRESH,
+			   GMTR_LAPTOP_THRESH, GMTR_MIN_ANGLE,
+			   GMTR_DEBOUNCE, GMTR_POLL_MS);
+		return;
+	}
 
-	g_debug ("GMTR response: %s", buf);
+	for (gint i = 0; i < len && i < 32; i++)
+		values[i] = bytes[i];
 
-	count = parse_acpi_package (buf, values, 32);
-	if (count < 18)
-		return FALSE;
+	apply_gmtr_values (drv_data, values, len);
+	g_debug ("Loaded %d values from GMTR calibration", len);
+}
 
-	apply_gmtr_values (drv_data, values, count);
-	g_debug ("Loaded %d values from GMTR calibration", count);
-	return TRUE;
+/*
+ * Collect the ResourceSource strings (ACPI controller paths) from a _CRS
+ * buffer, in resource order. They are the only printable backslash paths
+ * a serial-bus resource list contains.
+ */
+static gint
+extract_crs_sources (const guint8 *bytes, gint len, gchar *sources[], gint max)
+{
+	gint count = 0;
+	gint i = 0;
+
+	while (i < len && count < max) {
+		gint start = i;
+
+		while (i < len && bytes[i] >= 0x20 && bytes[i] < 0x7f)
+			i++;
+
+		if (i - start >= 8 && bytes[start] == '\\')
+			sources[count++] = g_strndup ((const gchar *) &bytes[start],
+						      i - start);
+
+		if (i == start)
+			i++;
+	}
+	return count;
+}
+
+/*
+ * ACPI namespace paths pad name segments to four characters with
+ * underscores (sysfs shows "\_SB_.PC00.I2C0") while _CRS ResourceSource
+ * strings may use the short form ("\_SB.PC00.I2C1"). Compare modulo
+ * that padding.
+ */
+static gboolean
+acpi_path_equal (const gchar *a, const gchar *b)
+{
+	gchar **pa = g_strsplit (a, ".", -1);
+	gchar **pb = g_strsplit (b, ".", -1);
+	gboolean equal = g_strv_length (pa) == g_strv_length (pb);
+
+	for (gint i = 0; equal && pa[i] != NULL && pb[i] != NULL; i++) {
+		gint la = strlen (pa[i]);
+		gint lb = strlen (pb[i]);
+
+		while (la > 0 && pa[i][la - 1] == '_')
+			la--;
+		while (lb > 0 && pb[i][lb - 1] == '_')
+			lb--;
+		equal = la == lb && strncmp (pa[i], pb[i], la) == 0;
+	}
+
+	g_strfreev (pa);
+	g_strfreev (pb);
+	return equal;
+}
+
+static gint
+match_controller (const gchar *controller, gchar *const controllers[2])
+{
+	for (gint i = 0; i < 2; i++) {
+		if (controllers[i] != NULL && acpi_path_equal (controller, controllers[i]))
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Pick the orientation sensor the way the Windows driver does: the first
+ * I2C resource listed in ACMK._CRS (its "slot 1"). On this firmware that
+ * is the display accelerometer. Falls back to the first sensor found.
+ */
+static void
+resolve_rotation_sensor (DrvData *drv_data, gchar *const controllers[2])
+{
+	guint8 bytes[512];
+	gchar *sources[4] = { NULL };
+	gint len, count, idx;
+
+	drv_data->rotation_idx = 0;
+	g_debug ("Sensor controllers: [0]=%s [1]=%s",
+		 controllers[0] != NULL ? controllers[0] : "none",
+		 controllers[1] != NULL ? controllers[1] : "none");
+
+	len = read_sysfs_bytes (CRS_SYSFS, bytes, sizeof (bytes));
+	if (len < 0) {
+		g_warning ("Cannot read %s (is the minibook_ec module loaded?); "
+			   "using first sensor for orientation", CRS_SYSFS);
+		return;
+	}
+
+	count = extract_crs_sources (bytes, len, sources, 4);
+	for (gint i = 0; i < count; i++)
+		g_debug ("_CRS resource %d: %s", i, sources[i]);
+
+	idx = count > 0 ? match_controller (sources[0], controllers) : -1;
+	if (idx >= 0) {
+		drv_data->rotation_idx = idx;
+		g_free (drv_data->rotation_controller);
+		drv_data->rotation_controller = g_strdup (sources[0]);
+		g_message ("MXC6655: orientation sensor is %s (%s)",
+			   idx == 0 ? "first" : "second", sources[0]);
+	} else {
+		g_warning ("Cannot match _CRS resources to sensors, "
+			   "using first sensor for orientation");
+	}
+
+	for (gint i = 0; i < 4; i++)
+		g_free (sources[i]);
 }
 
 static gint
@@ -588,6 +649,20 @@ median3 (float a, float b, float c)
 }
 
 static float
+median3_step (MedianFilter *f, float v)
+{
+	if (f->count < 3) {
+		f->buf[f->count++] = v;
+		return v;
+	}
+
+	f->buf[0] = f->buf[1];
+	f->buf[1] = f->buf[2];
+	f->buf[2] = v;
+	return median3 (f->buf[0], f->buf[1], f->buf[2]);
+}
+
+static float
 sample_variance (const float *buf, gint n)
 {
 	float sum = 0.0f, sum_sq = 0.0f;
@@ -604,109 +679,6 @@ sample_variance (const float *buf, gint n)
 	return (sum_sq - (float) n * mean * mean) / (float) (n - 1);
 }
 
-/*
- * Reconstruct Z component with smoothing in transition zone.
- * z_sq = 1 - x² - y² (clamped >= 0)
- * Interpolates between scaled and sqrt regions to avoid discontinuity.
- */
-static float
-reconstruct_z (float raw_z, float z_sq, float z_hint)
-{
-	float val;
-	float z_sq_c = z_sq < 0.0f ? 0.0f : z_sq;
-	double d = (double) z_sq_c;
-	float frac;
-
-	if (d <= 0.09) {
-		val = (float) (z_hint <= 0.0f ? -d * 0.5 : d * 0.5);
-	} else if (d > 0.16) {
-		double s = sqrt (d);
-		val = (float) (z_hint <= 0.0f ? -s : s);
-	} else {
-		double s16 = sqrt (0.16);
-		double interp = (d - 0.09) * s16 + (0.16 - d) * 0.09 * 0.5;
-		interp = z_hint <= 0.0f ? -interp : interp;
-		val = (float) (interp / 0.07);
-	}
-
-	frac = (raw_z * 100.0f - (float) (gint) (raw_z * 100.0f)) / 100.0f;
-	return val + frac;
-}
-
-/*
- * Resolve gravity offset from two reference points.
- * Computes 4 candidate Z offsets (±sqrt for each), picks the closest
- * pair, validates gravity magnitude, and determines Z direction sign.
- */
-static gint
-resolve_gravity_offset (const float ref[3], const float cur[3],
-			float trimmed_mean, gint *z_dir, float *out_offset)
-{
-	float ref_x2 = ref[0] * ref[0];
-	float ref_y2 = ref[1] * ref[1];
-	float cur_x2 = cur[0] * cur[0];
-	float cur_y2 = cur[1] * cur[1];
-
-	double ref_zsq = (1.0 - (double) ref_x2) - (double) ref_y2;
-	double cur_zsq = (1.0 - (double) cur_x2) - (double) cur_y2;
-	float ref_zp, ref_zm, cur_zp, cur_zm;
-	float d_mm, d_pm, d_pp, d_mp;
-	float ref_span, cur_span, threshold;
-	float offset;
-	float ref_mag, cur_mag;
-	gint new_dir;
-
-	if (ref_zsq < 0.0) ref_zsq = 0.0;
-	if (cur_zsq < 0.0) cur_zsq = 0.0;
-
-	ref_zp = (float) (ref[2] + sqrt (ref_zsq));
-	ref_zm = (float) (ref[2] - sqrt (ref_zsq));
-	cur_zp = (float) (cur[2] + sqrt (cur_zsq));
-	cur_zm = (float) (cur[2] - sqrt (cur_zsq));
-
-	d_mm = fabsf (ref_zm - cur_zm);
-	d_pm = fabsf (ref_zp - cur_zm);
-	d_pp = fabsf (ref_zp - cur_zp);
-	d_mp = fabsf (ref_zm - cur_zp);
-
-	ref_span = fabsf (ref_zm - ref_zp);
-	cur_span = fabsf (cur_zm - cur_zp);
-	threshold = (cur_span + ref_span) * 0.08f;
-
-	if (d_mm <= d_pm && d_mm <= d_pp && d_mm <= d_mp && d_mm < threshold) {
-		offset = (cur_zm + ref_zm) * 0.5f;
-		new_dir = 1;
-	} else if (d_pm <= d_mm && d_pm <= d_pp && d_pm <= d_mp && d_pm < threshold) {
-		offset = (cur_zm + ref_zp) * 0.5f;
-		new_dir = 1;
-	} else if (d_pp <= d_mm && d_pp <= d_pm && d_pp <= d_mp && d_pp < threshold) {
-		offset = (cur_zp + ref_zp) * 0.5f;
-		new_dir = -1;
-	} else if (d_mp <= d_mm && d_mp <= d_pm && d_mp <= d_pp && d_mp < threshold) {
-		offset = (cur_zp + ref_zm) * 0.5f;
-		new_dir = -1;
-	} else {
-		offset = (cur_zp + ref_zp) * 0.5f;
-		new_dir = -1;
-	}
-
-	ref_mag = (ref[2] - offset) * (ref[2] - offset) + ref_y2 + ref_x2;
-	cur_mag = (cur[2] - offset) * (cur[2] - offset) + cur_y2 + cur_x2;
-	if (ref_mag <= ORIENT_MAG_LO || ref_mag >= ORIENT_MAG_HI ||
-	    cur_mag <= ORIENT_MAG_LO || cur_mag >= ORIENT_MAG_HI)
-		return 0;
-
-	*z_dir = new_dir;
-
-	if (trimmed_mean != 0.0f && fabsf (offset - trimmed_mean) > 1.0f) {
-		*out_offset = 0.0f;
-		return 0;
-	}
-
-	*out_offset = offset;
-	return 1;
-}
-
 static void
 median_filter_z (OrientState *s, float *z)
 {
@@ -719,26 +691,6 @@ median_filter_z (OrientState *s, float *z)
 	s->z_median_buf[1] = s->z_median_buf[2];
 	s->z_median_buf[2] = *z;
 	*z = median3 (s->z_median_buf[0], s->z_median_buf[1], s->z_median_buf[2]);
-}
-
-static void
-ema_smooth (OrientState *s, const float in[3])
-{
-	for (gint i = 0; i < 3; i++) {
-		float delta = in[i] - s->smoothed[i];
-		float abs_delta = fabsf (delta);
-		float weight;
-
-		s->ema_delta[i] = s->ema_delta[i] * ORIENT_EMA_DECAY + delta * ORIENT_EMA_ALPHA;
-		s->ema_abs_delta[i] = s->ema_abs_delta[i] * ORIENT_EMA_DECAY + abs_delta * ORIENT_EMA_ALPHA;
-
-		if (fabsf (s->ema_abs_delta[i]) >= 0.0001f)
-			weight = fabsf (s->ema_delta[i] / s->ema_abs_delta[i]);
-		else
-			weight = 0.5f;
-
-		s->smoothed[i] = (1.0f - weight) * s->smoothed[i] + weight * in[i];
-	}
 }
 
 static gboolean
@@ -770,299 +722,49 @@ max_buffer_variance (OrientState *s)
 	return mv;
 }
 
-static void
-reset_accumulator (OrientState *s)
-{
-	s->acc_x = s->acc_y = s->acc_z = 0.0f;
-	s->acc_sq_x = s->acc_sq_y = s->acc_sq_z = 0.0f;
-	s->stable_count = 0;
-	s->outlier_detected = 0;
-}
-
-static void
-average_buffer (OrientState *s, float *avg_x, float *avg_y, float *avg_z)
-{
-	float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-
-	for (gint i = 0; i < ORIENT_BUF_SIZE; i++) {
-		sx += s->buf_x[i];
-		sy += s->buf_y[i];
-		sz += s->buf_z[i];
-	}
-	*avg_x = sx / (float) ORIENT_BUF_SIZE;
-	*avg_y = sy / (float) ORIENT_BUF_SIZE;
-	*avg_z = sz / (float) ORIENT_BUF_SIZE;
-}
-
-static float
-signed_z (float z_sq, gint z_dir)
-{
-	if (z_dir != -1)
-		return sqrtf (z_sq);
-	return -sqrtf (z_sq);
-}
-
-static void
-record_offset (OrientState *s)
-{
-	if (s->offset_count < ORIENT_OFFSET_BUF)
-		s->offset_buf[s->offset_count++] = s->gravity_offset;
-}
-
-static void
-try_resolve_offset (OrientState *s,
-		    const float ref[3], const float cur[3])
-{
-	float new_offset;
-	gint ret;
-
-	ret = resolve_gravity_offset (ref, cur, s->trimmed_mean,
-				      &s->z_dir, &new_offset);
-	if (ret == 1) {
-		s->gravity_offset = new_offset;
-		record_offset (s);
-	}
-	reset_accumulator (s);
-}
-
-static void
-bootstrap_reference (OrientState *s, float avg_x, float avg_y,
-		     float avg_z, float z_sq)
-{
-	s->ref_x = avg_x;
-	s->ref_y = avg_y;
-	s->ref_z = avg_z;
-	s->gravity_offset = avg_z - signed_z (z_sq, s->z_dir);
-}
-
-static void
-accumulate_sample (OrientState *s, float avg_x, float avg_y, float avg_z)
-{
-	s->stable_count++;
-	s->acc_x += avg_x;
-	s->acc_y += avg_y;
-	s->acc_z += avg_z;
-	s->acc_sq_x += avg_x * avg_x;
-	s->acc_sq_y += avg_y * avg_y;
-	s->acc_sq_z += avg_z * avg_z;
-}
-
-static void
-update_peak_trough (OrientState *s, float avg_x, float avg_y, float avg_z)
-{
-	if (s->stable_count == 1) {
-		s->peak_x = s->trough_x = avg_x;
-		s->peak_y = s->trough_y = avg_y;
-		s->peak_z = s->trough_z = avg_z;
-	}
-	if (avg_z > s->peak_z) {
-		s->peak_x = avg_x;
-		s->peak_y = avg_y;
-		s->peak_z = avg_z;
-	}
-	if (avg_z < s->trough_z) {
-		s->trough_x = avg_x;
-		s->trough_y = avg_y;
-		s->trough_z = avg_z;
-	}
-}
-
-static void
-detect_outlier (OrientState *s, float avg_z)
-{
-	if (avg_z == s->trough_z &&
-	    s->peak_z - avg_z > ORIENT_OUTLIER_RANGE)
-		s->outlier_detected = 1;
-	if (avg_z == s->peak_z &&
-	    avg_z - s->trough_z > ORIENT_OUTLIER_RANGE)
-		s->outlier_detected = 1;
-}
-
-static void
-handle_long_stable (OrientState *s, float avg_z, float z_sq)
-{
-	float v_x = (s->acc_sq_x * 1000.0f - s->acc_x * s->acc_x) / 999000.0f;
-	float v_y = (s->acc_sq_y * 1000.0f - s->acc_y * s->acc_y) / 999000.0f;
-	float v_z = (s->acc_sq_z * 1000.0f - s->acc_z * s->acc_z) / 999000.0f;
-	float mv = v_x;
-
-	if (v_y > mv) mv = v_y;
-	if (v_z > mv) mv = v_z;
-
-	if (mv < 0.004f) {
-		s->gravity_offset = avg_z - signed_z (z_sq, s->z_dir);
-		record_offset (s);
-	}
-}
-
-static void
-handle_stable_drift (OrientState *s, float avg_x, float avg_y,
-		     float avg_z, float z_sq)
-{
-	accumulate_sample (s, avg_x, avg_y, avg_z);
-	update_peak_trough (s, avg_x, avg_y, avg_z);
-
-	if (s->stable_count < 2)
-		return;
-
-	detect_outlier (s, avg_z);
-
-	if (s->outlier_detected) {
-		float ref_pt[3] = { s->peak_x, s->peak_y, s->peak_z };
-		float cur_pt[3] = { avg_x, avg_y, avg_z };
-		try_resolve_offset (s, ref_pt, cur_pt);
-	} else if (s->stable_count >= 1000) {
-		handle_long_stable (s, avg_z, z_sq);
-	}
-}
-
-static void
-update_offset_trimmed_mean (OrientState *s)
-{
-	float mn, mx, sum;
-
-	if (s->offset_count < ORIENT_OFFSET_BUF)
-		return;
-
-	s->offset_count = 0;
-	mn = mx = s->offset_buf[0];
-	sum = 0.0f;
-	for (gint i = 0; i < ORIENT_OFFSET_BUF; i++) {
-		sum += s->offset_buf[i];
-		if (s->offset_buf[i] > mx) mx = s->offset_buf[i];
-		if (s->offset_buf[i] < mn) mn = s->offset_buf[i];
-	}
-	s->trimmed_mean = (sum - mn - mx) / (float) (ORIENT_OFFSET_BUF - 2);
-}
-
-static gint
-update_gravity_tracking (OrientState *s, float avg_x, float avg_y,
-			 float avg_z, float z_sq, float *mean_offset)
-{
-	float z_drift;
-
-	if (s->ref_x == 0.0f && s->ref_y == 0.0f && s->ref_z == 0.0f) {
-		bootstrap_reference (s, avg_x, avg_y, avg_z, z_sq);
-		return 0;
-	}
-
-	z_drift = fabsf (avg_z - s->ref_z);
-
-	if (z_drift <= ORIENT_DRIFT_LIMIT) {
-		handle_stable_drift (s, avg_x, avg_y, avg_z, z_sq);
-	} else if (z_drift > ORIENT_JUMP_LIMIT) {
-		s->ref_x = s->ref_y = s->ref_z = 0.0f;
-		return -1;
-	} else {
-		float ref_pt[3] = { s->ref_x, s->ref_y, s->ref_z };
-		float cur_pt[3] = { avg_x, avg_y, avg_z };
-		try_resolve_offset (s, ref_pt, cur_pt);
-	}
-
-	update_offset_trimmed_mean (s);
-
-	s->ref_x = avg_x;
-	s->ref_y = avg_y;
-	s->ref_z = avg_z;
-
-	if (s->offset_init && s->offset_count > 0) {
-		s->offset_init = 0;
-		*mean_offset = s->offset_buf[0];
-	}
-
-	if (avg_z - s->gravity_offset > 0.0f)
-		s->z_dir = 1;
-	else if (avg_z - s->gravity_offset < 0.0f)
-		s->z_dir = -1;
-
-	return 0;
-}
-
-static float
-blend_z_output (OrientState *s, const float in[3], float max_var)
-{
-	float z_sq = (1.0f - s->smoothed[0] * s->smoothed[0])
-		   - s->smoothed[1] * s->smoothed[1];
-	float z_hint = s->smoothed[2] - s->gravity_offset;
-	float z_out;
-
-	if (max_var < 0.0024f) {
-		z_out = reconstruct_z (in[2], z_sq, z_hint);
-	} else if (max_var >= 0.0056f) {
-		z_out = in[2] - s->gravity_offset;
-	} else {
-		float z_recon = reconstruct_z (in[2], z_sq, z_hint);
-		float z_raw = in[2] - s->gravity_offset;
-		z_out = ((z_raw - z_recon) * max_var + z_recon * 0.0056f
-			- z_raw * 0.0024f) / 0.0032f;
-	}
-
-	if (max_var < 0.002f) {
-		float mag = sqrtf (in[0] * in[0] + in[1] * in[1] + z_out * z_out);
-		if (mag < 0.6f || mag > 1.4f)
-			z_out = 0.5f;
-	}
-
-	return z_out;
-}
-
-static gint
-update_orientation (OrientState *s, const Vec3 *accel)
+/*
+ * Gate orientation classification until the input has been quiet and
+ * stable. Stays TRUE afterwards regardless of motion; only a large Z
+ * jump suppresses classification for a single sample (it would otherwise
+ * reset the debounce of the true orientation).
+ */
+static gboolean
+orientation_filter_settled (OrientState *s, const Vec3 *accel)
 {
 	float in[3] = { accel->x, accel->y, accel->z };
 	float max_var;
-	float mean_offset = 0.0f;
+	float avg_z = 0.0f;
 
 	median_filter_z (s, &in[2]);
-	ema_smooth (s, in);
 
-	if (!store_in_buffer (s, in)) {
-		float z_sq = (1.0f - s->smoothed[0] * s->smoothed[0])
-			   - s->smoothed[1] * s->smoothed[1];
-		s->out_offset = s->gravity_offset;
-		s->out_mean = 0.0f;
-		s->out_z = z_sq >= 0.0f ? signed_z (z_sq, s->z_dir) : 0.0f;
-		return 0;
-	}
+	if (!store_in_buffer (s, in))
+		return FALSE;
 
 	max_var = max_buffer_variance (s);
+	if (max_var > ORIENT_VARIANCE_THRESH)
+		s->quiet_count = 0;
+	else if (s->quiet_count < ORIENT_STABLE_MIN)
+		s->quiet_count++;
 
-	if (max_var > ORIENT_VARIANCE_THRESH) {
-		reset_accumulator (s);
-	} else if (s->stable_count <= ORIENT_STABLE_MIN) {
-		s->stable_count++;
+	if (s->quiet_count < ORIENT_STABLE_MIN)
+		return s->primed;
+
+	for (gint i = 0; i < ORIENT_BUF_SIZE; i++)
+		avg_z += s->buf_z[i];
+	avg_z /= (float) ORIENT_BUF_SIZE;
+
+	if (!s->have_ref) {
+		s->ref_z = avg_z;
+		s->have_ref = TRUE;
+	} else if (fabsf (avg_z - s->ref_z) > ORIENT_JUMP_LIMIT) {
+		s->have_ref = FALSE;
+		return FALSE;
+	} else {
+		s->ref_z = avg_z;
 	}
 
-	if (s->stable_count > ORIENT_STABLE_MIN) {
-		float avg_x, avg_y, avg_z, z_sq, xy_sq;
-
-		average_buffer (s, &avg_x, &avg_y, &avg_z);
-
-		xy_sq = avg_x * avg_x + avg_y * avg_y;
-		z_sq = 1.0f - xy_sq;
-
-		if (z_sq < 0.0f) {
-			double norm = sqrt ((double) xy_sq);
-			avg_x = (float) ((double) avg_x / norm) * 0.9999f;
-			avg_y = (float) ((double) avg_y / norm) * 0.9999f;
-			z_sq = 0.0f;
-			reset_accumulator (s);
-		}
-
-		if (update_gravity_tracking (s, avg_x, avg_y, avg_z, z_sq,
-					     &mean_offset) < 0)
-			return 0;
-	}
-
-	s->out_offset = s->gravity_offset;
-	s->out_mean = mean_offset;
-	s->out_z = blend_z_output (s, in, max_var);
-
-	if (fabsf (s->gravity_offset) < 1e-6f)
-		return 0;
-	if (fabsf (mean_offset) > 1e-6f)
-		return 2;
-	return 1;
+	s->primed = TRUE;
+	return TRUE;
 }
 
 static gint
@@ -1108,7 +810,9 @@ compute_hinge_angle (DrvData *drv_data, const Vec3 *cal1, const Vec3 *cal2)
 	drv_data->prev_z1 = a1z;
 	drv_data->prev_z2 = a2z;
 
-	/* GMTR axis_mode_2=1: use X component for atan2 */
+	/* The GMTR axis-mode nibble is 3 (negated X with the display in the
+	 * Windows driver's slot 1); +X with the base in our slot 1 yields the
+	 * same hinge angle. */
 	v1 = a1x;
 	v2 = a2x;
 
@@ -1167,6 +871,8 @@ build_synthetic_readings (gint orient, AccelReadings *readings)
 static void
 recover_i2c (DrvData *drv_data)
 {
+	gchar *controllers[2] = { NULL, NULL };
+
 	g_debug ("I2C read failed, attempting re-unbind");
 	for (gint i = 0; i < 2; i++) {
 		if (drv_data->i2c_fds[i] >= 0) {
@@ -1175,20 +881,30 @@ recover_i2c (DrvData *drv_data)
 		}
 	}
 	try_unbind ();
-	if (find_accels (drv_data->i2c_fds) < 2) {
+	if (find_accels (drv_data->i2c_fds, controllers) < 2) {
 		g_warning ("Failed to re-open MXC6655 accelerometers");
 		drv_data->i2c_fds[0] = drv_data->i2c_fds[1] = -1;
+	} else if (drv_data->rotation_controller != NULL) {
+		gint idx = match_controller (drv_data->rotation_controller, controllers);
+
+		if (idx >= 0) {
+			drv_data->rotation_idx = idx;
+		} else {
+			g_warning ("Rotation sensor lost after I2C recovery");
+			drv_data->rotation_idx = 0;
+		}
 	}
+	g_free (controllers[0]);
+	g_free (controllers[1]);
 }
 
 static void
 update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 			     const Vec3 *accel)
 {
-	gint ost = update_orientation (&drv_data->orient, accel);
 	gint new_orient;
 
-	if (ost <= 0)
+	if (!orientation_filter_settled (&drv_data->orient, accel))
 		return;
 
 	new_orient = classify_orientation (accel);
@@ -1210,7 +926,7 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 		return;
 
 	drv_data->orient_debounce++;
-	if (drv_data->orient_debounce > GMTR_DEBOUNCE) {
+	if (drv_data->orient_debounce > drv_data->debounce) {
 		AccelReadings readings;
 
 		drv_data->cur_orient = new_orient;
@@ -1247,9 +963,9 @@ set_tablet_mode (SensorDevice *sensor_device, gint mode, float angle)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 
+	call_ltsm (mode);
 	drv_data->mode = mode;
 	g_debug ("%s mode (angle=%.1f)", mode ? "Tablet" : "Laptop", angle);
-	call_ltsm (mode, &drv_data->ltsm_warned);
 	if (drv_data->uinput_fd >= 0)
 		emit_tablet_mode (drv_data->uinput_fd, mode);
 
@@ -1266,19 +982,25 @@ update_tablet_mode (SensorDevice *sensor_device, float angle)
 		drv_data->t_count++;
 		drv_data->l_count = 0;
 		drv_data->n_count = 0;
-		if (drv_data->mode != 1 && drv_data->t_count > GMTR_DEBOUNCE)
+		if (drv_data->mode != 1 && drv_data->t_count > drv_data->debounce)
 			set_tablet_mode (sensor_device, 1, angle);
-	} else if (angle >= drv_data->laptop_thresh) {
-		drv_data->n_count++;
-		drv_data->t_count = 0;
-		drv_data->l_count = 0;
-	} else if (angle > drv_data->min_angle) {
-		drv_data->l_count++;
-		drv_data->t_count = 0;
-		drv_data->n_count = 0;
-		if (drv_data->mode != 0 && drv_data->l_count > GMTR_DEBOUNCE)
-			set_tablet_mode (sensor_device, 0, angle);
+		return;
 	}
+
+	drv_data->t_count = 0;
+	if (angle >= drv_data->laptop_thresh) {
+		drv_data->n_count++;
+		drv_data->l_count = 0;
+		return;
+	}
+
+	/* Count below the minimum angle too, as the Windows driver does; the
+	 * transition itself stays gated on reopening past it. */
+	drv_data->l_count++;
+	drv_data->n_count = 0;
+	if (drv_data->mode != 0 && drv_data->l_count > drv_data->debounce &&
+	    angle > drv_data->min_angle)
+		set_tablet_mode (sensor_device, 0, angle);
 }
 
 static gboolean
@@ -1299,15 +1021,20 @@ poll_sensors (gpointer user_data)
 	a2 = calibrate (&raw2, drv_data->cal2);
 
 	{
-		Vec3 orient = drv_data->orientation_source == 0 ? raw1 : raw2;
+		Vec3 orient = drv_data->rotation_idx == 0 ? raw1 : raw2;
 		orient.x = -orient.x;
 		update_orientation_debounce (sensor_device, drv_data, &orient);
 	}
 
-	/* Gate on the X-Z plane that compute_hinge_angle projects onto, not Y:
-	 * near full fold gravity leaves Y, and those are the large-angle samples. */
-	if (sqrtf (a1.x * a1.x + a1.z * a1.z) < GRAVITY_MIN &&
-	    sqrtf (a2.x * a2.x + a2.z * a2.z) < GRAVITY_MIN)
+	/* Suppress single-sample spikes on the Z axis both angle inputs use */
+	a1.z = median3_step (&drv_data->hinge_median[0], a1.z);
+	a2.z = median3_step (&drv_data->hinge_median[1], a2.z);
+
+	/* Both sensors' Y axes point along the hinge, so gravity on Y means the
+	 * hinge is far from horizontal and the X-Z projection the angle is
+	 * computed from is no longer meaningful. Windows abstains unless both
+	 * stay below 0.9 (~64 degrees of hinge tilt). */
+	if (fabsf (a1.y) > HINGE_AXIS_MAX || fabsf (a2.y) > HINGE_AXIS_MAX)
 		return G_SOURCE_CONTINUE;
 
 	angle = compute_hinge_angle (drv_data, &a1, &a2);
@@ -1337,6 +1064,7 @@ mxc6655_open (GUdevDevice *device)
 {
 	SensorDevice *sensor_device;
 	DrvData *drv_data;
+	gchar *controllers[2] = { NULL, NULL };
 	gint found;
 
 	/* Try to find both accelerometers, unbinding kernel driver if needed */
@@ -1353,36 +1081,42 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->prev_z1 = 1.0f;
 	drv_data->prev_z2 = 1.0f;
 	drv_data->panel_deg = detect_panel_rotation ();
-	drv_data->orientation_source = configured_orientation_source ();
+	drv_data->rotation_idx = 0;
 
 	/* DSDT GMTR calibration matrices (defaults) */
 	memcpy (drv_data->cal1, (gint8[]){ 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 9);
 	memcpy (drv_data->cal2, (gint8[]){ 1, 0, 0, 0, -1, 0, 0, 0, -1 }, 9);
 
 	/* Try to load matrices and thresholds from ACPI DSDT */
-	if (load_gmtr (drv_data))
-		g_debug ("Dynamic calibration loaded from ACPI");
-	else
-		g_debug ("Using default calibration matrices");
+	load_gmtr (drv_data);
 
-	found = find_accels (drv_data->i2c_fds);
+	found = find_accels (drv_data->i2c_fds, controllers);
 	if (found < 2) {
 		g_debug ("Found %d accelerometers, trying unbind", found);
 		for (gint i = 0; i < found; i++) {
 			close (drv_data->i2c_fds[i]);
 			drv_data->i2c_fds[i] = -1;
 		}
+		g_free (controllers[0]);
+		g_free (controllers[1]);
+		controllers[0] = controllers[1] = NULL;
 		try_unbind ();
-		found = find_accels (drv_data->i2c_fds);
+		found = find_accels (drv_data->i2c_fds, controllers);
 	}
 
 	if (found < 2) {
 		g_debug ("Need 2 MXC6655 accelerometers, found %d", found);
 		for (gint i = 0; i < found; i++)
 			close (drv_data->i2c_fds[i]);
+		g_free (controllers[0]);
+		g_free (controllers[1]);
 		g_free (drv_data);
 		return NULL;
 	}
+
+	resolve_rotation_sensor (drv_data, controllers);
+	g_free (controllers[0]);
+	g_free (controllers[1]);
 
 	/* Setup uinput for SW_TABLET_MODE */
 	drv_data->uinput_fd = setup_uinput ();
@@ -1434,7 +1168,7 @@ start_poll_timer (SensorDevice *sensor_device)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 
-	drv_data->timeout_id = g_timeout_add (GMTR_POLL_MS, poll_sensors, sensor_device);
+	drv_data->timeout_id = g_timeout_add (drv_data->poll_ms, poll_sensors, sensor_device);
 	g_source_set_name_by_id (drv_data->timeout_id, "[mxc6655] poll_sensors");
 	g_message ("MXC6655 dual-accel: polling active");
 }
@@ -1607,6 +1341,7 @@ mxc6655_close (SensorDevice *sensor_device)
 			close (drv_data->i2c_fds[i]);
 	}
 
+	g_clear_pointer (&drv_data->rotation_controller, g_free);
 	g_clear_pointer (&sensor_device->priv, g_free);
 	g_free (sensor_device);
 }
