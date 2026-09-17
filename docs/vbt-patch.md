@@ -177,13 +177,15 @@ The `update-vbt-clock` script automates the full workflow:
 1. Reads the current VBT from `/sys/kernel/debug/dri/0000:00:02.0/i915_vbt`
 1. Runs `vbt_patch --hz <rate>` to produce a patched copy
 1. Installs the patched VBT to `/lib/firmware/vbt`
-1. Adds `/lib/firmware/vbt` to `mkinitcpio.conf` so it is included in the
-   initramfs
+1. Registers `/lib/firmware/vbt` with the initramfs generator (`FILES` in
+   `mkinitcpio.conf`, a dracut drop-in, or an initramfs-tools hook) so it is
+   included in the initramfs
 1. Adds `i915.vbt_firmware=vbt` to the kernel command line
-1. Rebuilds the initramfs
+1. Rebuilds the initramfs and, under GRUB, the bootloader config
 
-`--revert` removes the kernel parameter. The patched VBT file remains in
-`/lib/firmware/vbt` but is ignored without the kernel parameter.
+`--revert` removes the patched VBT, its initramfs registration and the kernel
+parameter, then rebuilds the initramfs so the stock VBT is used again.
 
-The script currently supports Limine (`/etc/default/limine`) as the bootloader
-and mkinitcpio for initramfs generation.
+The script supports Limine (`/etc/default/limine`) and GRUB
+(`/etc/default/grub`) as bootloaders, and mkinitcpio, dracut and
+initramfs-tools for initramfs generation.

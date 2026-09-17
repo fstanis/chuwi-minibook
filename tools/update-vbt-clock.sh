@@ -11,6 +11,7 @@ readonly CMDLINE_ARG="i915.vbt_firmware=vbt"
 
 readonly MKINITCPIO_CONF="/etc/mkinitcpio.conf"
 readonly DRACUT_CONF="/etc/dracut.conf.d/90-vbt.conf"
+readonly INITRAMFS_HOOK="/etc/initramfs-tools/hooks/vbt"
 readonly LIMINE_CONF="/etc/default/limine"
 readonly GRUB_CONF="/etc/default/grub"
 
@@ -112,7 +113,14 @@ update_initramfs_conf() {
       echo "Wrote ${DRACUT_CONF}"
       ;;
     initramfs-tools)
-      # initramfs-tools pulls /lib/firmware in via the stock hooks.
+      cat >"${INITRAMFS_HOOK}" <<EOF
+#!/bin/sh
+[ "\$1" = prereqs ] && { echo; exit 0; }
+. /usr/share/initramfs-tools/hook-functions
+copy_file firmware "${FIRMWARE_VBT}"
+EOF
+      chmod +x "${INITRAMFS_HOOK}"
+      echo "Wrote ${INITRAMFS_HOOK}"
       ;;
   esac
 }
@@ -165,12 +173,16 @@ rebuild() {
   echo "Initramfs rebuilt"
 
   if [[ "${BOOTLOADER}" == "grub" ]]; then
-    update-grub
+    if command -v update-grub &>/dev/null; then
+      update-grub
+    else
+      grub-mkconfig -o /boot/grub/grub.cfg
+    fi
   fi
 }
 
 revert() {
-  rm -f "${FIRMWARE_VBT}" "${DRACUT_CONF}"
+  rm -f "${FIRMWARE_VBT}" "${DRACUT_CONF}" "${INITRAMFS_HOOK}"
 
   if [[ -f "${LIMINE_CONF}" ]]; then
     sed -i "s| ${CMDLINE_ARG}||g" "${LIMINE_CONF}"
