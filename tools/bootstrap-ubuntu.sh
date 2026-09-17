@@ -37,7 +37,7 @@ readonly APT_PACKAGES=(
   build-essential meson ninja-build pkgconf clang git curl patch
   dkms "linux-headers-$(uname -r)" acpi-call-dkms
   libglib2.0-dev libgudev-1.0-dev libpolkit-gobject-1-dev systemd-dev
-  libudev-dev
+  libudev-dev libdrm-dev
 )
 
 require_root() {
