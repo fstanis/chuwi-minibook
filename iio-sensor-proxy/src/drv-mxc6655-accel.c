@@ -46,8 +46,6 @@
 #define DRM_PANEL_ORIENT_PROP	"panel orientation"
 #define MAX_DRM_CARD		4
 
-#define ENV_ORIENTATION_SENSOR	"MINIBOOK_ORIENTATION_SENSOR"
-
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
 #define GMTR_TABLET_THRESH	185.0f
 #define GMTR_LAPTOP_THRESH	175.0f
@@ -152,9 +150,11 @@ typedef struct {
 	gint               n_count;
 
 	/* Dynamic thresholds from DSDT GMTR */
-	float              tablet_thresh;
+	gint               tablet_thresh;
 	float              laptop_thresh;
 	float              min_angle;
+	gint               debounce;
+	gint               poll_ms;
 
 	/* Orientation state */
 	OrientState        orient;
@@ -165,23 +165,10 @@ typedef struct {
 	/* Degrees of static panel rotation to compensate for */
 	gint               panel_deg;
 
-	/* Raw accelerometer used for orientation */
-	gint               orientation_source;
+	/* Raw accelerometer used for orientation (ACPI _CRS slot 1) */
+	gint               rotation_idx;
+	gchar             *rotation_controller;
 } DrvData;
-
-static gint
-configured_orientation_source (void)
-{
-	const gchar *value = g_getenv (ENV_ORIENTATION_SENSOR);
-
-	if (value == NULL || *value == '\0' || g_str_equal (value, "base"))
-		return 0;
-	if (g_str_equal (value, "display"))
-		return 1;
-
-	g_warning ("Ignoring invalid %s=%s", ENV_ORIENTATION_SENSOR, value);
-	return 0;
-}
 
 /* Rotation the compositor already applies for a given DRM panel orientation. */
 static gint
@@ -354,7 +341,7 @@ probe_bus (gint bus)
 }
 
 static gint
-find_accels (gint fds[2])
+find_accels (gint fds[2], gchar *controllers[2])
 {
 	gint found = 0;
 	GUdevClient *client;
@@ -378,7 +365,9 @@ find_accels (gint fds[2])
 		fd = probe_bus (bus);
 		if (fd >= 0) {
 			g_debug ("MXC6655 found on %s (%s)", name, acpi_path);
-			fds[found++] = fd;
+			fds[found] = fd;
+			controllers[found] = g_strdup (acpi_path);
+			found++;
 		}
 	}
 
@@ -438,6 +427,7 @@ call_ltsm (gint mode, gboolean *warned)
 }
 
 #define ACPI_GMTR_CMD		"\\_SB.ACMK.GMTR"
+#define ACPI_CRS_CMD		"\\_SB.ACMK._CRS"
 
 static ssize_t
 acpi_call_read (const gchar *cmd, gchar *buf, gsize buf_size)
@@ -464,27 +454,66 @@ acpi_call_read (const gchar *cmd, gchar *buf, gsize buf_size)
 	return len;
 }
 
+/* acpi_call renders Buffers as "{0x79, 0x35, ...}" and Packages as "[...]" */
+static gchar **
+split_acpi_list (const gchar *buf)
+{
+	gchar *end;
+	g_autofree gchar *copy = NULL;
+	gchar **elements;
+
+	if (buf[0] != '{' && buf[0] != '[')
+		return NULL;
+
+	copy = g_strdup (buf + 1);
+	end = strpbrk (copy, "}]");
+	if (end)
+		*end = '\0';
+
+	elements = g_strsplit (copy, ",", -1);
+	for (gint i = 0; elements[i] != NULL; i++)
+		g_strstrip (elements[i]);
+	return elements;
+}
+
 static gint
 parse_acpi_package (const gchar *buf, guint64 *values, gint max_values)
 {
 	gchar **elements;
-	gchar *end;
-	g_autofree gchar *copy = NULL;
 	gint count = 0;
 
-	if (buf[0] != '{')
+	elements = split_acpi_list (buf);
+	if (elements == NULL)
 		return 0;
 
-	copy = g_strdup (buf + 1);
-	end = strchr (copy, '}');
-	if (end)
-		*end = '\0';
-
-	elements = g_strsplit (copy, ", ", -1);
 	for (gint i = 0; elements[i] != NULL && count < max_values; i++) {
 		if (strlen (elements[i]) == 0)
 			continue;
 		values[count++] = g_ascii_strtoull (elements[i], NULL, 0);
+	}
+	g_strfreev (elements);
+	return count;
+}
+
+static gint
+parse_acpi_bytes (const gchar *buf, guint8 *bytes, gint max_bytes)
+{
+	gchar **elements;
+	gint count = 0;
+
+	elements = split_acpi_list (buf);
+	if (elements == NULL)
+		return 0;
+
+	for (gint i = 0; elements[i] != NULL && count < max_bytes; i++) {
+		guint64 value;
+
+		if (strlen (elements[i]) == 0)
+			continue;
+		value = g_ascii_strtoull (elements[i], NULL, 0);
+		if (value > 0xff)
+			break;
+		bytes[count++] = (guint8) value;
 	}
 	g_strfreev (elements);
 	return count;
@@ -505,6 +534,18 @@ apply_gmtr_values (DrvData *drv_data, const guint64 *values, gint count)
 		drv_data->laptop_thresh = (float) values[19];
 	if (count > 20 && values[20] > 0)
 		drv_data->min_angle = (float) values[20];
+	if (count > 21 && values[21] > 0)
+		drv_data->debounce = (gint) values[21];
+	if (count > 22) {
+		guint64 rate = values[22] & 0xff;
+
+		drv_data->poll_ms = rate == 0 ? 100 : (gint) (1000 / rate);
+		drv_data->poll_ms = CLAMP (drv_data->poll_ms, 10, 1000);
+	}
+	if (count > 23)
+		g_debug ("GMTR axis mode %d, gate config %d",
+			 (gint) (values[23] & 0xf),
+			 (gint) ((values[23] >> 4) & 0xf));
 }
 
 static gboolean
@@ -517,6 +558,8 @@ load_gmtr (DrvData *drv_data)
 	drv_data->tablet_thresh = GMTR_TABLET_THRESH;
 	drv_data->laptop_thresh = GMTR_LAPTOP_THRESH;
 	drv_data->min_angle = GMTR_MIN_ANGLE;
+	drv_data->debounce = GMTR_DEBOUNCE;
+	drv_data->poll_ms = GMTR_POLL_MS;
 
 	if (acpi_call_read (ACPI_GMTR_CMD, buf, sizeof (buf)) < 0)
 		return FALSE;
@@ -530,6 +573,88 @@ load_gmtr (DrvData *drv_data)
 	apply_gmtr_values (drv_data, values, count);
 	g_debug ("Loaded %d values from GMTR calibration", count);
 	return TRUE;
+}
+
+/*
+ * Collect the ResourceSource strings (ACPI controller paths) from a _CRS
+ * buffer, in resource order. They are the only printable backslash paths
+ * a serial-bus resource list contains.
+ */
+static gint
+extract_crs_sources (const guint8 *bytes, gint len, gchar *sources[], gint max)
+{
+	gint count = 0;
+	gint i = 0;
+
+	while (i < len && count < max) {
+		gint start = i;
+
+		while (i < len && bytes[i] >= 0x20 && bytes[i] < 0x7f)
+			i++;
+
+		if (i - start >= 8 && bytes[start] == '\\')
+			sources[count++] = g_strndup ((const gchar *) &bytes[start],
+						      i - start);
+
+		if (i == start)
+			i++;
+	}
+	return count;
+}
+
+static gint
+match_controller (const gchar *controller, gchar *const controllers[2])
+{
+	for (gint i = 0; i < 2; i++) {
+		if (controllers[i] != NULL && g_str_equal (controller, controllers[i]))
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Pick the orientation sensor the way the Windows driver does: the first
+ * I2C resource listed in ACMK._CRS (its "slot 1"). On this firmware that
+ * is the display accelerometer. Falls back to the first sensor found.
+ */
+static void
+resolve_rotation_sensor (DrvData *drv_data, gchar *const controllers[2])
+{
+	gchar buf[4096];
+	guint8 bytes[512];
+	gchar *sources[4] = { NULL };
+	gint len, count, idx;
+
+	drv_data->rotation_idx = 0;
+	g_debug ("Sensor controllers: [0]=%s [1]=%s",
+		 controllers[0] != NULL ? controllers[0] : "none",
+		 controllers[1] != NULL ? controllers[1] : "none");
+
+	if (acpi_call_read (ACPI_CRS_CMD, buf, sizeof (buf)) < 0) {
+		g_warning ("Cannot evaluate %s, using first sensor for orientation",
+			   ACPI_CRS_CMD);
+		return;
+	}
+
+	len = parse_acpi_bytes (buf, bytes, sizeof (bytes));
+	count = extract_crs_sources (bytes, len, sources, 4);
+	for (gint i = 0; i < count; i++)
+		g_debug ("_CRS resource %d: %s", i, sources[i]);
+
+	idx = count > 0 ? match_controller (sources[0], controllers) : -1;
+	if (idx >= 0) {
+		drv_data->rotation_idx = idx;
+		g_free (drv_data->rotation_controller);
+		drv_data->rotation_controller = g_strdup (sources[0]);
+		g_message ("MXC6655: orientation sensor is %s (%s)",
+			   idx == 0 ? "first" : "second", sources[0]);
+	} else {
+		g_warning ("Cannot match _CRS resources to sensors, "
+			   "using first sensor for orientation");
+	}
+
+	for (gint i = 0; i < 4; i++)
+		g_free (sources[i]);
 }
 
 static gint
@@ -1108,7 +1233,9 @@ compute_hinge_angle (DrvData *drv_data, const Vec3 *cal1, const Vec3 *cal2)
 	drv_data->prev_z1 = a1z;
 	drv_data->prev_z2 = a2z;
 
-	/* GMTR axis_mode_2=1: use X component for atan2 */
+	/* The GMTR axis-mode nibble is 3 (negated X with the display in the
+	 * Windows driver's slot 1); +X with the base in our slot 1 yields the
+	 * same hinge angle. */
 	v1 = a1x;
 	v2 = a2x;
 
@@ -1167,6 +1294,8 @@ build_synthetic_readings (gint orient, AccelReadings *readings)
 static void
 recover_i2c (DrvData *drv_data)
 {
+	gchar *controllers[2] = { NULL, NULL };
+
 	g_debug ("I2C read failed, attempting re-unbind");
 	for (gint i = 0; i < 2; i++) {
 		if (drv_data->i2c_fds[i] >= 0) {
@@ -1175,10 +1304,21 @@ recover_i2c (DrvData *drv_data)
 		}
 	}
 	try_unbind ();
-	if (find_accels (drv_data->i2c_fds) < 2) {
+	if (find_accels (drv_data->i2c_fds, controllers) < 2) {
 		g_warning ("Failed to re-open MXC6655 accelerometers");
 		drv_data->i2c_fds[0] = drv_data->i2c_fds[1] = -1;
+	} else if (drv_data->rotation_controller != NULL) {
+		gint idx = match_controller (drv_data->rotation_controller, controllers);
+
+		if (idx >= 0) {
+			drv_data->rotation_idx = idx;
+		} else {
+			g_warning ("Rotation sensor lost after I2C recovery");
+			drv_data->rotation_idx = 0;
+		}
 	}
+	g_free (controllers[0]);
+	g_free (controllers[1]);
 }
 
 static void
@@ -1210,7 +1350,7 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 		return;
 
 	drv_data->orient_debounce++;
-	if (drv_data->orient_debounce > GMTR_DEBOUNCE) {
+	if (drv_data->orient_debounce > drv_data->debounce) {
 		AccelReadings readings;
 
 		drv_data->cur_orient = new_orient;
@@ -1266,7 +1406,7 @@ update_tablet_mode (SensorDevice *sensor_device, float angle)
 		drv_data->t_count++;
 		drv_data->l_count = 0;
 		drv_data->n_count = 0;
-		if (drv_data->mode != 1 && drv_data->t_count > GMTR_DEBOUNCE)
+		if (drv_data->mode != 1 && drv_data->t_count > drv_data->debounce)
 			set_tablet_mode (sensor_device, 1, angle);
 	} else if (angle >= drv_data->laptop_thresh) {
 		drv_data->n_count++;
@@ -1276,7 +1416,7 @@ update_tablet_mode (SensorDevice *sensor_device, float angle)
 		drv_data->l_count++;
 		drv_data->t_count = 0;
 		drv_data->n_count = 0;
-		if (drv_data->mode != 0 && drv_data->l_count > GMTR_DEBOUNCE)
+		if (drv_data->mode != 0 && drv_data->l_count > drv_data->debounce)
 			set_tablet_mode (sensor_device, 0, angle);
 	}
 }
@@ -1299,7 +1439,7 @@ poll_sensors (gpointer user_data)
 	a2 = calibrate (&raw2, drv_data->cal2);
 
 	{
-		Vec3 orient = drv_data->orientation_source == 0 ? raw1 : raw2;
+		Vec3 orient = drv_data->rotation_idx == 0 ? raw1 : raw2;
 		orient.x = -orient.x;
 		update_orientation_debounce (sensor_device, drv_data, &orient);
 	}
@@ -1337,6 +1477,7 @@ mxc6655_open (GUdevDevice *device)
 {
 	SensorDevice *sensor_device;
 	DrvData *drv_data;
+	gchar *controllers[2] = { NULL, NULL };
 	gint found;
 
 	/* Try to find both accelerometers, unbinding kernel driver if needed */
@@ -1353,7 +1494,7 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->prev_z1 = 1.0f;
 	drv_data->prev_z2 = 1.0f;
 	drv_data->panel_deg = detect_panel_rotation ();
-	drv_data->orientation_source = configured_orientation_source ();
+	drv_data->rotation_idx = 0;
 
 	/* DSDT GMTR calibration matrices (defaults) */
 	memcpy (drv_data->cal1, (gint8[]){ 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 9);
@@ -1365,24 +1506,33 @@ mxc6655_open (GUdevDevice *device)
 	else
 		g_debug ("Using default calibration matrices");
 
-	found = find_accels (drv_data->i2c_fds);
+	found = find_accels (drv_data->i2c_fds, controllers);
 	if (found < 2) {
 		g_debug ("Found %d accelerometers, trying unbind", found);
 		for (gint i = 0; i < found; i++) {
 			close (drv_data->i2c_fds[i]);
 			drv_data->i2c_fds[i] = -1;
 		}
+		g_free (controllers[0]);
+		g_free (controllers[1]);
+		controllers[0] = controllers[1] = NULL;
 		try_unbind ();
-		found = find_accels (drv_data->i2c_fds);
+		found = find_accels (drv_data->i2c_fds, controllers);
 	}
 
 	if (found < 2) {
 		g_debug ("Need 2 MXC6655 accelerometers, found %d", found);
 		for (gint i = 0; i < found; i++)
 			close (drv_data->i2c_fds[i]);
+		g_free (controllers[0]);
+		g_free (controllers[1]);
 		g_free (drv_data);
 		return NULL;
 	}
+
+	resolve_rotation_sensor (drv_data, controllers);
+	g_free (controllers[0]);
+	g_free (controllers[1]);
 
 	/* Setup uinput for SW_TABLET_MODE */
 	drv_data->uinput_fd = setup_uinput ();
@@ -1434,7 +1584,7 @@ start_poll_timer (SensorDevice *sensor_device)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 
-	drv_data->timeout_id = g_timeout_add (GMTR_POLL_MS, poll_sensors, sensor_device);
+	drv_data->timeout_id = g_timeout_add (drv_data->poll_ms, poll_sensors, sensor_device);
 	g_source_set_name_by_id (drv_data->timeout_id, "[mxc6655] poll_sensors");
 	g_message ("MXC6655 dual-accel: polling active");
 }
@@ -1607,6 +1757,7 @@ mxc6655_close (SensorDevice *sensor_device)
 			close (drv_data->i2c_fds[i]);
 	}
 
+	g_clear_pointer (&drv_data->rotation_controller, g_free);
 	g_clear_pointer (&sensor_device->priv, g_free);
 	g_free (sensor_device);
 }

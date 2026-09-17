@@ -58,18 +58,17 @@ iio-sensor-proxy` shows the current `ExecStart` to copy.
 
 ## Orientation sensor
 
-By default, the base accelerometer's raw reading supplies screen orientation.
-To use the display accelerometer instead, add this to the same systemd override:
-
-```
-[Service]
-Environment=MINIBOOK_ORIENTATION_SENSOR=display
-```
-
-Valid values are `base` and `display`. Restart `iio-sensor-proxy` after changing
-the setting. Selection does not change sensor discovery or the calibrated
-readings used for hinge calculation. The selected raw reading has its X axis
-reversed before entering the existing orientation filter.
+The accelerometer supplying screen orientation is picked automatically: the
+driver evaluates the ACPI `ACMK._CRS` method and uses the first I2C resource
+listed -- the same "slot 1" the stock Windows driver feeds its orientation
+output from. On this firmware that is the display accelerometer, so rotation
+follows the screen whenever the two halves move independently (the hinge stays
+free past the tablet threshold). The chosen sensor is logged at startup. If
+`_CRS` cannot be evaluated or matched, the first sensor found is used and a
+warning is logged. The `MINIBOOK_ORIENTATION_SENSOR` environment variable is
+no longer honored. Selection does not change sensor discovery or the
+calibrated readings used for hinge calculation. The selected raw reading has
+its X axis reversed before entering the orientation filter.
 
 ## Lid gating
 
