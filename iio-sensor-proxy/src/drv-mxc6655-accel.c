@@ -279,14 +279,24 @@ static gint
 read_accel (gint fd, Vec3 *v)
 {
 	guint8 buf[6];
+	float scale = 0.00024414063f;
+	float mag;
 
 	if (i2c_xfer (fd, MXC6655_REG_XOUT, buf, 6) < 0)
 		return -1;
 
-	float scale = 0.00024414063f;
 	v->x = (float)(gint)(gint16)((buf[0] << 8) | buf[1]) * scale;
 	v->y = (float)(gint)(gint16)((buf[2] << 8) | buf[3]) * scale;
 	v->z = (float)(gint)(gint16)((buf[4] << 8) | buf[5]) * scale;
+
+	/* The chips come up in an unknown full-scale range and read several
+	 * times gravity; every consumer is directional, so normalize. */
+	mag = sqrtf (v->x * v->x + v->y * v->y + v->z * v->z);
+	if (mag >= 0.1f && mag <= 8.0f) {
+		v->x /= mag;
+		v->y /= mag;
+		v->z /= mag;
+	}
 	return 0;
 }
 
@@ -587,11 +597,40 @@ extract_crs_sources (const guint8 *bytes, gint len, gchar *sources[], gint max)
 	return count;
 }
 
+/*
+ * ACPI namespace paths pad name segments to four characters with
+ * underscores (sysfs shows "\_SB_.PC00.I2C0") while _CRS ResourceSource
+ * strings may use the short form ("\_SB.PC00.I2C1"). Compare modulo
+ * that padding.
+ */
+static gboolean
+acpi_path_equal (const gchar *a, const gchar *b)
+{
+	gchar **pa = g_strsplit (a, ".", -1);
+	gchar **pb = g_strsplit (b, ".", -1);
+	gboolean equal = g_strv_length (pa) == g_strv_length (pb);
+
+	for (gint i = 0; equal && pa[i] != NULL && pb[i] != NULL; i++) {
+		gint la = strlen (pa[i]);
+		gint lb = strlen (pb[i]);
+
+		while (la > 0 && pa[i][la - 1] == '_')
+			la--;
+		while (lb > 0 && pb[i][lb - 1] == '_')
+			lb--;
+		equal = la == lb && strncmp (pa[i], pb[i], la) == 0;
+	}
+
+	g_strfreev (pa);
+	g_strfreev (pb);
+	return equal;
+}
+
 static gint
 match_controller (const gchar *controller, gchar *const controllers[2])
 {
 	for (gint i = 0; i < 2; i++) {
-		if (controllers[i] != NULL && g_str_equal (controller, controllers[i]))
+		if (controllers[i] != NULL && acpi_path_equal (controller, controllers[i]))
 			return i;
 	}
 	return -1;
