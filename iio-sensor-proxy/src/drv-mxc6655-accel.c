@@ -25,7 +25,10 @@
 
 /* MXC6655 I2C registers */
 #define MXC6655_ADDR		0x15
+#define MXC6655_REG_INT_SRC1	0x01	/* TILT, ORZ, ORXY[1:0], DRDY */
+#define MXC6655_REG_STATUS	0x02	/* ORD, ORIZ[1:0], ORIXY[1:0] */
 #define MXC6655_REG_XOUT	0x03	/* 6 bytes: XH,XL,YH,YL,ZH,ZL */
+#define MXC6655_REG_TOUT	0x09	/* temperature, 0 at 25C, 0.586C/LSB */
 #define MXC6655_REG_DEVID	0x0E
 
 #define ACPI_CALL_PATH		"/proc/acpi/call"
@@ -298,6 +301,50 @@ read_accel (gint fd, Vec3 *v)
 		v->z /= mag;
 	}
 	return 0;
+}
+
+static const char *
+chip_orxy_name (guint orxy)
+{
+	switch (orxy) {
+	case 0:
+		return "+X";
+	case 1:
+		return "+Y";
+	case 2:
+		return "-X";
+	default:
+		return "-Y";
+	}
+}
+
+/*
+ * Read the on-chip orientation engine of the rotation sensor and dump it
+ * next to the software classification for comparison: INT_SRC1 holds the
+ * debounced ORXY quadrant (chip hysteresis), STATUS the instantaneous one.
+ */
+static void
+log_chip_orientation (DrvData *drv_data)
+{
+	guint8 buf[9];
+	guint8 src1, status;
+	gint fd;
+
+	fd = drv_data->i2c_fds[drv_data->rotation_idx];
+	if (fd < 0)
+		return;
+	if (i2c_xfer (fd, MXC6655_REG_INT_SRC1, buf, sizeof (buf)) < 0)
+		return;
+
+	src1 = buf[0];
+	status = buf[1];
+	g_debug ("chip: orxy=%s tilt=%d orz=%d drdy=%d | instant=%s ord=%d | "
+		 "tout=%.1fC sensor=%d",
+		 chip_orxy_name ((src1 >> 4) & 0x3), (src1 >> 7) & 0x1,
+		 (src1 >> 6) & 0x1, src1 & 0x1,
+		 chip_orxy_name (status & 0x3), (status >> 4) & 0x1,
+		 (gint8) buf[MXC6655_REG_TOUT - MXC6655_REG_INT_SRC1] * 0.586f + 25.0f,
+		 drv_data->rotation_idx);
 }
 
 static Vec3
@@ -1142,6 +1189,8 @@ poll_sensors (gpointer user_data)
 	a1.z = median3_step (&drv_data->hinge_median[0], a1.z);
 	a2.z = median3_step (&drv_data->hinge_median[1], a2.z);
 	g_debug ("hinge median: z1=%.3f z2=%.3f", a1.z, a2.z);
+
+	log_chip_orientation (drv_data);
 
 	/* Both sensors' Y axes point along the hinge, so gravity on Y means the
 	 * hinge is far from horizontal and the X-Z projection the angle is
