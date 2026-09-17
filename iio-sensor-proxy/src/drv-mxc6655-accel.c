@@ -1,9 +1,9 @@
 /*
  * MXC6655 dual-accelerometer driver for CHUWI MiniBook.
  * Reads two MXC6655 accelerometers via raw I2C, computes hinge angle
- * for tablet mode detection, and provides orientation via a multi-stage
- * filter pipeline. Tablet mode transitions are emitted via uinput
- * (SW_TABLET_MODE) and ACPI.
+ * for tablet mode detection, and provides orientation through a
+ * settle-gated classifier. Tablet mode transitions are emitted via
+ * uinput (SW_TABLET_MODE) and ACPI.
  */
 
 #include "drivers.h"
@@ -53,24 +53,25 @@
 #define GMTR_DEBOUNCE		5
 #define GMTR_POLL_MS		50
 
-#define GRAVITY_MIN		0.3f
+/* Both sensors' Y axes point along the hinge; past this the X-Z plane the
+ * hinge angle is computed from no longer carries enough of gravity. */
+#define HINGE_AXIS_MAX		0.9f
 
-/* Multi-stage orientation filter constants */
+/* Orientation settle-filter constants */
 #define ORIENT_BUF_SIZE		20
-#define ORIENT_OFFSET_BUF	5
 #define ORIENT_VARIANCE_THRESH	0.01f
 #define ORIENT_STABLE_MIN	10
-#define ORIENT_EMA_ALPHA	0.01f
-#define ORIENT_EMA_DECAY	0.99f
-#define ORIENT_DRIFT_LIMIT	0.2f
 #define ORIENT_JUMP_LIMIT	2.4f
-#define ORIENT_OUTLIER_RANGE	0.5f
-#define ORIENT_MAG_LO		0.85f
-#define ORIENT_MAG_HI		1.15f
 
 typedef struct {
 	float x, y, z;
 } Vec3;
+
+/* Median-of-3 spike suppressor for the hinge-angle Z inputs */
+typedef struct {
+	float	buf[3];
+	gint	count;
+} MedianFilter;
 
 typedef enum {
 	MXC_ORIENT_NORMAL   = 0,
@@ -84,11 +85,6 @@ typedef struct {
 	float              z_median_buf[3];
 	gint               z_median_count;
 
-	/* EMA filters per axis [x=0, y=1, z=2] */
-	float              ema_delta[3];
-	float              ema_abs_delta[3];
-	float              smoothed[3];
-
 	/* Circular buffer for stability detection */
 	float              buf_x[ORIENT_BUF_SIZE];
 	float              buf_y[ORIENT_BUF_SIZE];
@@ -96,33 +92,13 @@ typedef struct {
 	gint               buf_idx;
 	gint               buf_full;
 
-	/* Accumulator for long-term stability */
-	gint               stable_count;
-	float              acc_x, acc_y, acc_z;
-	float              acc_sq_x, acc_sq_y, acc_sq_z;
-	float              peak_x, peak_y, peak_z;
-	float              trough_x, trough_y, trough_z;
-	gint               outlier_detected;
+	/* Consecutive quiet samples before classification is allowed */
+	gint               quiet_count;
 
-	/* Reference gravity point */
-	float              ref_x, ref_y, ref_z;
-
-	/* Z direction: 1=positive, -1=negative, 0=unknown */
-	gint               z_dir;
-
-	/* Gravity offset tracking */
-	float              gravity_offset;
-	float              trimmed_mean;
-
-	/* Offset buffer (trimmed mean) */
-	float              offset_buf[ORIENT_OFFSET_BUF];
-	gint               offset_count;
-	gint               offset_init;
-
-	/* Output */
-	float              out_offset;
-	float              out_mean;
-	float              out_z;
+	/* Z-jump detection */
+	float              ref_z;
+	gboolean           have_ref;
+	gboolean           primed;
 } OrientState;
 
 typedef struct {
@@ -142,6 +118,9 @@ typedef struct {
 	/* Previous Z values for hinge angle computation */
 	float              prev_z1;
 	float              prev_z2;
+
+	/* Median filters for the hinge-angle Z inputs */
+	MedianFilter       hinge_median[2];
 
 	/* Tablet mode state machine */
 	gint               mode;
@@ -713,6 +692,20 @@ median3 (float a, float b, float c)
 }
 
 static float
+median3_step (MedianFilter *f, float v)
+{
+	if (f->count < 3) {
+		f->buf[f->count++] = v;
+		return v;
+	}
+
+	f->buf[0] = f->buf[1];
+	f->buf[1] = f->buf[2];
+	f->buf[2] = v;
+	return median3 (f->buf[0], f->buf[1], f->buf[2]);
+}
+
+static float
 sample_variance (const float *buf, gint n)
 {
 	float sum = 0.0f, sum_sq = 0.0f;
@@ -729,109 +722,6 @@ sample_variance (const float *buf, gint n)
 	return (sum_sq - (float) n * mean * mean) / (float) (n - 1);
 }
 
-/*
- * Reconstruct Z component with smoothing in transition zone.
- * z_sq = 1 - x² - y² (clamped >= 0)
- * Interpolates between scaled and sqrt regions to avoid discontinuity.
- */
-static float
-reconstruct_z (float raw_z, float z_sq, float z_hint)
-{
-	float val;
-	float z_sq_c = z_sq < 0.0f ? 0.0f : z_sq;
-	double d = (double) z_sq_c;
-	float frac;
-
-	if (d <= 0.09) {
-		val = (float) (z_hint <= 0.0f ? -d * 0.5 : d * 0.5);
-	} else if (d > 0.16) {
-		double s = sqrt (d);
-		val = (float) (z_hint <= 0.0f ? -s : s);
-	} else {
-		double s16 = sqrt (0.16);
-		double interp = (d - 0.09) * s16 + (0.16 - d) * 0.09 * 0.5;
-		interp = z_hint <= 0.0f ? -interp : interp;
-		val = (float) (interp / 0.07);
-	}
-
-	frac = (raw_z * 100.0f - (float) (gint) (raw_z * 100.0f)) / 100.0f;
-	return val + frac;
-}
-
-/*
- * Resolve gravity offset from two reference points.
- * Computes 4 candidate Z offsets (±sqrt for each), picks the closest
- * pair, validates gravity magnitude, and determines Z direction sign.
- */
-static gint
-resolve_gravity_offset (const float ref[3], const float cur[3],
-			float trimmed_mean, gint *z_dir, float *out_offset)
-{
-	float ref_x2 = ref[0] * ref[0];
-	float ref_y2 = ref[1] * ref[1];
-	float cur_x2 = cur[0] * cur[0];
-	float cur_y2 = cur[1] * cur[1];
-
-	double ref_zsq = (1.0 - (double) ref_x2) - (double) ref_y2;
-	double cur_zsq = (1.0 - (double) cur_x2) - (double) cur_y2;
-	float ref_zp, ref_zm, cur_zp, cur_zm;
-	float d_mm, d_pm, d_pp, d_mp;
-	float ref_span, cur_span, threshold;
-	float offset;
-	float ref_mag, cur_mag;
-	gint new_dir;
-
-	if (ref_zsq < 0.0) ref_zsq = 0.0;
-	if (cur_zsq < 0.0) cur_zsq = 0.0;
-
-	ref_zp = (float) (ref[2] + sqrt (ref_zsq));
-	ref_zm = (float) (ref[2] - sqrt (ref_zsq));
-	cur_zp = (float) (cur[2] + sqrt (cur_zsq));
-	cur_zm = (float) (cur[2] - sqrt (cur_zsq));
-
-	d_mm = fabsf (ref_zm - cur_zm);
-	d_pm = fabsf (ref_zp - cur_zm);
-	d_pp = fabsf (ref_zp - cur_zp);
-	d_mp = fabsf (ref_zm - cur_zp);
-
-	ref_span = fabsf (ref_zm - ref_zp);
-	cur_span = fabsf (cur_zm - cur_zp);
-	threshold = (cur_span + ref_span) * 0.08f;
-
-	if (d_mm <= d_pm && d_mm <= d_pp && d_mm <= d_mp && d_mm < threshold) {
-		offset = (cur_zm + ref_zm) * 0.5f;
-		new_dir = 1;
-	} else if (d_pm <= d_mm && d_pm <= d_pp && d_pm <= d_mp && d_pm < threshold) {
-		offset = (cur_zm + ref_zp) * 0.5f;
-		new_dir = 1;
-	} else if (d_pp <= d_mm && d_pp <= d_pm && d_pp <= d_mp && d_pp < threshold) {
-		offset = (cur_zp + ref_zp) * 0.5f;
-		new_dir = -1;
-	} else if (d_mp <= d_mm && d_mp <= d_pm && d_mp <= d_pp && d_mp < threshold) {
-		offset = (cur_zp + ref_zm) * 0.5f;
-		new_dir = -1;
-	} else {
-		offset = (cur_zp + ref_zp) * 0.5f;
-		new_dir = -1;
-	}
-
-	ref_mag = (ref[2] - offset) * (ref[2] - offset) + ref_y2 + ref_x2;
-	cur_mag = (cur[2] - offset) * (cur[2] - offset) + cur_y2 + cur_x2;
-	if (ref_mag <= ORIENT_MAG_LO || ref_mag >= ORIENT_MAG_HI ||
-	    cur_mag <= ORIENT_MAG_LO || cur_mag >= ORIENT_MAG_HI)
-		return 0;
-
-	*z_dir = new_dir;
-
-	if (trimmed_mean != 0.0f && fabsf (offset - trimmed_mean) > 1.0f) {
-		*out_offset = 0.0f;
-		return 0;
-	}
-
-	*out_offset = offset;
-	return 1;
-}
-
 static void
 median_filter_z (OrientState *s, float *z)
 {
@@ -844,26 +734,6 @@ median_filter_z (OrientState *s, float *z)
 	s->z_median_buf[1] = s->z_median_buf[2];
 	s->z_median_buf[2] = *z;
 	*z = median3 (s->z_median_buf[0], s->z_median_buf[1], s->z_median_buf[2]);
-}
-
-static void
-ema_smooth (OrientState *s, const float in[3])
-{
-	for (gint i = 0; i < 3; i++) {
-		float delta = in[i] - s->smoothed[i];
-		float abs_delta = fabsf (delta);
-		float weight;
-
-		s->ema_delta[i] = s->ema_delta[i] * ORIENT_EMA_DECAY + delta * ORIENT_EMA_ALPHA;
-		s->ema_abs_delta[i] = s->ema_abs_delta[i] * ORIENT_EMA_DECAY + abs_delta * ORIENT_EMA_ALPHA;
-
-		if (fabsf (s->ema_abs_delta[i]) >= 0.0001f)
-			weight = fabsf (s->ema_delta[i] / s->ema_abs_delta[i]);
-		else
-			weight = 0.5f;
-
-		s->smoothed[i] = (1.0f - weight) * s->smoothed[i] + weight * in[i];
-	}
 }
 
 static gboolean
@@ -895,299 +765,49 @@ max_buffer_variance (OrientState *s)
 	return mv;
 }
 
-static void
-reset_accumulator (OrientState *s)
-{
-	s->acc_x = s->acc_y = s->acc_z = 0.0f;
-	s->acc_sq_x = s->acc_sq_y = s->acc_sq_z = 0.0f;
-	s->stable_count = 0;
-	s->outlier_detected = 0;
-}
-
-static void
-average_buffer (OrientState *s, float *avg_x, float *avg_y, float *avg_z)
-{
-	float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-
-	for (gint i = 0; i < ORIENT_BUF_SIZE; i++) {
-		sx += s->buf_x[i];
-		sy += s->buf_y[i];
-		sz += s->buf_z[i];
-	}
-	*avg_x = sx / (float) ORIENT_BUF_SIZE;
-	*avg_y = sy / (float) ORIENT_BUF_SIZE;
-	*avg_z = sz / (float) ORIENT_BUF_SIZE;
-}
-
-static float
-signed_z (float z_sq, gint z_dir)
-{
-	if (z_dir != -1)
-		return sqrtf (z_sq);
-	return -sqrtf (z_sq);
-}
-
-static void
-record_offset (OrientState *s)
-{
-	if (s->offset_count < ORIENT_OFFSET_BUF)
-		s->offset_buf[s->offset_count++] = s->gravity_offset;
-}
-
-static void
-try_resolve_offset (OrientState *s,
-		    const float ref[3], const float cur[3])
-{
-	float new_offset;
-	gint ret;
-
-	ret = resolve_gravity_offset (ref, cur, s->trimmed_mean,
-				      &s->z_dir, &new_offset);
-	if (ret == 1) {
-		s->gravity_offset = new_offset;
-		record_offset (s);
-	}
-	reset_accumulator (s);
-}
-
-static void
-bootstrap_reference (OrientState *s, float avg_x, float avg_y,
-		     float avg_z, float z_sq)
-{
-	s->ref_x = avg_x;
-	s->ref_y = avg_y;
-	s->ref_z = avg_z;
-	s->gravity_offset = avg_z - signed_z (z_sq, s->z_dir);
-}
-
-static void
-accumulate_sample (OrientState *s, float avg_x, float avg_y, float avg_z)
-{
-	s->stable_count++;
-	s->acc_x += avg_x;
-	s->acc_y += avg_y;
-	s->acc_z += avg_z;
-	s->acc_sq_x += avg_x * avg_x;
-	s->acc_sq_y += avg_y * avg_y;
-	s->acc_sq_z += avg_z * avg_z;
-}
-
-static void
-update_peak_trough (OrientState *s, float avg_x, float avg_y, float avg_z)
-{
-	if (s->stable_count == 1) {
-		s->peak_x = s->trough_x = avg_x;
-		s->peak_y = s->trough_y = avg_y;
-		s->peak_z = s->trough_z = avg_z;
-	}
-	if (avg_z > s->peak_z) {
-		s->peak_x = avg_x;
-		s->peak_y = avg_y;
-		s->peak_z = avg_z;
-	}
-	if (avg_z < s->trough_z) {
-		s->trough_x = avg_x;
-		s->trough_y = avg_y;
-		s->trough_z = avg_z;
-	}
-}
-
-static void
-detect_outlier (OrientState *s, float avg_z)
-{
-	if (avg_z == s->trough_z &&
-	    s->peak_z - avg_z > ORIENT_OUTLIER_RANGE)
-		s->outlier_detected = 1;
-	if (avg_z == s->peak_z &&
-	    avg_z - s->trough_z > ORIENT_OUTLIER_RANGE)
-		s->outlier_detected = 1;
-}
-
-static void
-handle_long_stable (OrientState *s, float avg_z, float z_sq)
-{
-	float v_x = (s->acc_sq_x * 1000.0f - s->acc_x * s->acc_x) / 999000.0f;
-	float v_y = (s->acc_sq_y * 1000.0f - s->acc_y * s->acc_y) / 999000.0f;
-	float v_z = (s->acc_sq_z * 1000.0f - s->acc_z * s->acc_z) / 999000.0f;
-	float mv = v_x;
-
-	if (v_y > mv) mv = v_y;
-	if (v_z > mv) mv = v_z;
-
-	if (mv < 0.004f) {
-		s->gravity_offset = avg_z - signed_z (z_sq, s->z_dir);
-		record_offset (s);
-	}
-}
-
-static void
-handle_stable_drift (OrientState *s, float avg_x, float avg_y,
-		     float avg_z, float z_sq)
-{
-	accumulate_sample (s, avg_x, avg_y, avg_z);
-	update_peak_trough (s, avg_x, avg_y, avg_z);
-
-	if (s->stable_count < 2)
-		return;
-
-	detect_outlier (s, avg_z);
-
-	if (s->outlier_detected) {
-		float ref_pt[3] = { s->peak_x, s->peak_y, s->peak_z };
-		float cur_pt[3] = { avg_x, avg_y, avg_z };
-		try_resolve_offset (s, ref_pt, cur_pt);
-	} else if (s->stable_count >= 1000) {
-		handle_long_stable (s, avg_z, z_sq);
-	}
-}
-
-static void
-update_offset_trimmed_mean (OrientState *s)
-{
-	float mn, mx, sum;
-
-	if (s->offset_count < ORIENT_OFFSET_BUF)
-		return;
-
-	s->offset_count = 0;
-	mn = mx = s->offset_buf[0];
-	sum = 0.0f;
-	for (gint i = 0; i < ORIENT_OFFSET_BUF; i++) {
-		sum += s->offset_buf[i];
-		if (s->offset_buf[i] > mx) mx = s->offset_buf[i];
-		if (s->offset_buf[i] < mn) mn = s->offset_buf[i];
-	}
-	s->trimmed_mean = (sum - mn - mx) / (float) (ORIENT_OFFSET_BUF - 2);
-}
-
-static gint
-update_gravity_tracking (OrientState *s, float avg_x, float avg_y,
-			 float avg_z, float z_sq, float *mean_offset)
-{
-	float z_drift;
-
-	if (s->ref_x == 0.0f && s->ref_y == 0.0f && s->ref_z == 0.0f) {
-		bootstrap_reference (s, avg_x, avg_y, avg_z, z_sq);
-		return 0;
-	}
-
-	z_drift = fabsf (avg_z - s->ref_z);
-
-	if (z_drift <= ORIENT_DRIFT_LIMIT) {
-		handle_stable_drift (s, avg_x, avg_y, avg_z, z_sq);
-	} else if (z_drift > ORIENT_JUMP_LIMIT) {
-		s->ref_x = s->ref_y = s->ref_z = 0.0f;
-		return -1;
-	} else {
-		float ref_pt[3] = { s->ref_x, s->ref_y, s->ref_z };
-		float cur_pt[3] = { avg_x, avg_y, avg_z };
-		try_resolve_offset (s, ref_pt, cur_pt);
-	}
-
-	update_offset_trimmed_mean (s);
-
-	s->ref_x = avg_x;
-	s->ref_y = avg_y;
-	s->ref_z = avg_z;
-
-	if (s->offset_init && s->offset_count > 0) {
-		s->offset_init = 0;
-		*mean_offset = s->offset_buf[0];
-	}
-
-	if (avg_z - s->gravity_offset > 0.0f)
-		s->z_dir = 1;
-	else if (avg_z - s->gravity_offset < 0.0f)
-		s->z_dir = -1;
-
-	return 0;
-}
-
-static float
-blend_z_output (OrientState *s, const float in[3], float max_var)
-{
-	float z_sq = (1.0f - s->smoothed[0] * s->smoothed[0])
-		   - s->smoothed[1] * s->smoothed[1];
-	float z_hint = s->smoothed[2] - s->gravity_offset;
-	float z_out;
-
-	if (max_var < 0.0024f) {
-		z_out = reconstruct_z (in[2], z_sq, z_hint);
-	} else if (max_var >= 0.0056f) {
-		z_out = in[2] - s->gravity_offset;
-	} else {
-		float z_recon = reconstruct_z (in[2], z_sq, z_hint);
-		float z_raw = in[2] - s->gravity_offset;
-		z_out = ((z_raw - z_recon) * max_var + z_recon * 0.0056f
-			- z_raw * 0.0024f) / 0.0032f;
-	}
-
-	if (max_var < 0.002f) {
-		float mag = sqrtf (in[0] * in[0] + in[1] * in[1] + z_out * z_out);
-		if (mag < 0.6f || mag > 1.4f)
-			z_out = 0.5f;
-	}
-
-	return z_out;
-}
-
-static gint
-update_orientation (OrientState *s, const Vec3 *accel)
+/*
+ * Gate orientation classification until the input has been quiet and
+ * stable. Stays TRUE afterwards regardless of motion; only a large Z
+ * jump suppresses classification for a single sample (it would otherwise
+ * reset the debounce of the true orientation).
+ */
+static gboolean
+orientation_filter_settled (OrientState *s, const Vec3 *accel)
 {
 	float in[3] = { accel->x, accel->y, accel->z };
 	float max_var;
-	float mean_offset = 0.0f;
+	float avg_z = 0.0f;
 
 	median_filter_z (s, &in[2]);
-	ema_smooth (s, in);
 
-	if (!store_in_buffer (s, in)) {
-		float z_sq = (1.0f - s->smoothed[0] * s->smoothed[0])
-			   - s->smoothed[1] * s->smoothed[1];
-		s->out_offset = s->gravity_offset;
-		s->out_mean = 0.0f;
-		s->out_z = z_sq >= 0.0f ? signed_z (z_sq, s->z_dir) : 0.0f;
-		return 0;
-	}
+	if (!store_in_buffer (s, in))
+		return FALSE;
 
 	max_var = max_buffer_variance (s);
+	if (max_var > ORIENT_VARIANCE_THRESH)
+		s->quiet_count = 0;
+	else if (s->quiet_count < ORIENT_STABLE_MIN)
+		s->quiet_count++;
 
-	if (max_var > ORIENT_VARIANCE_THRESH) {
-		reset_accumulator (s);
-	} else if (s->stable_count <= ORIENT_STABLE_MIN) {
-		s->stable_count++;
+	if (s->quiet_count < ORIENT_STABLE_MIN)
+		return s->primed;
+
+	for (gint i = 0; i < ORIENT_BUF_SIZE; i++)
+		avg_z += s->buf_z[i];
+	avg_z /= (float) ORIENT_BUF_SIZE;
+
+	if (!s->have_ref) {
+		s->ref_z = avg_z;
+		s->have_ref = TRUE;
+	} else if (fabsf (avg_z - s->ref_z) > ORIENT_JUMP_LIMIT) {
+		s->have_ref = FALSE;
+		return FALSE;
+	} else {
+		s->ref_z = avg_z;
 	}
 
-	if (s->stable_count > ORIENT_STABLE_MIN) {
-		float avg_x, avg_y, avg_z, z_sq, xy_sq;
-
-		average_buffer (s, &avg_x, &avg_y, &avg_z);
-
-		xy_sq = avg_x * avg_x + avg_y * avg_y;
-		z_sq = 1.0f - xy_sq;
-
-		if (z_sq < 0.0f) {
-			double norm = sqrt ((double) xy_sq);
-			avg_x = (float) ((double) avg_x / norm) * 0.9999f;
-			avg_y = (float) ((double) avg_y / norm) * 0.9999f;
-			z_sq = 0.0f;
-			reset_accumulator (s);
-		}
-
-		if (update_gravity_tracking (s, avg_x, avg_y, avg_z, z_sq,
-					     &mean_offset) < 0)
-			return 0;
-	}
-
-	s->out_offset = s->gravity_offset;
-	s->out_mean = mean_offset;
-	s->out_z = blend_z_output (s, in, max_var);
-
-	if (fabsf (s->gravity_offset) < 1e-6f)
-		return 0;
-	if (fabsf (mean_offset) > 1e-6f)
-		return 2;
-	return 1;
+	s->primed = TRUE;
+	return TRUE;
 }
 
 static gint
@@ -1325,10 +945,9 @@ static void
 update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 			     const Vec3 *accel)
 {
-	gint ost = update_orientation (&drv_data->orient, accel);
 	gint new_orient;
 
-	if (ost <= 0)
+	if (!orientation_filter_settled (&drv_data->orient, accel))
 		return;
 
 	new_orient = classify_orientation (accel);
@@ -1408,17 +1027,23 @@ update_tablet_mode (SensorDevice *sensor_device, float angle)
 		drv_data->n_count = 0;
 		if (drv_data->mode != 1 && drv_data->t_count > drv_data->debounce)
 			set_tablet_mode (sensor_device, 1, angle);
-	} else if (angle >= drv_data->laptop_thresh) {
-		drv_data->n_count++;
-		drv_data->t_count = 0;
-		drv_data->l_count = 0;
-	} else if (angle > drv_data->min_angle) {
-		drv_data->l_count++;
-		drv_data->t_count = 0;
-		drv_data->n_count = 0;
-		if (drv_data->mode != 0 && drv_data->l_count > drv_data->debounce)
-			set_tablet_mode (sensor_device, 0, angle);
+		return;
 	}
+
+	drv_data->t_count = 0;
+	if (angle >= drv_data->laptop_thresh) {
+		drv_data->n_count++;
+		drv_data->l_count = 0;
+		return;
+	}
+
+	/* Count below the minimum angle too, as the Windows driver does; the
+	 * transition itself stays gated on reopening past it. */
+	drv_data->l_count++;
+	drv_data->n_count = 0;
+	if (drv_data->mode != 0 && drv_data->l_count > drv_data->debounce &&
+	    angle > drv_data->min_angle)
+		set_tablet_mode (sensor_device, 0, angle);
 }
 
 static gboolean
@@ -1444,10 +1069,15 @@ poll_sensors (gpointer user_data)
 		update_orientation_debounce (sensor_device, drv_data, &orient);
 	}
 
-	/* Gate on the X-Z plane that compute_hinge_angle projects onto, not Y:
-	 * near full fold gravity leaves Y, and those are the large-angle samples. */
-	if (sqrtf (a1.x * a1.x + a1.z * a1.z) < GRAVITY_MIN &&
-	    sqrtf (a2.x * a2.x + a2.z * a2.z) < GRAVITY_MIN)
+	/* Suppress single-sample spikes on the Z axis both angle inputs use */
+	a1.z = median3_step (&drv_data->hinge_median[0], a1.z);
+	a2.z = median3_step (&drv_data->hinge_median[1], a2.z);
+
+	/* Both sensors' Y axes point along the hinge, so gravity on Y means the
+	 * hinge is far from horizontal and the X-Z projection the angle is
+	 * computed from is no longer meaningful. Windows abstains unless both
+	 * stay below 0.9 (~64 degrees of hinge tilt). */
+	if (fabsf (a1.y) > HINGE_AXIS_MAX || fabsf (a2.y) > HINGE_AXIS_MAX)
 		return G_SOURCE_CONTINUE;
 
 	angle = compute_hinge_angle (drv_data, &a1, &a2);

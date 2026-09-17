@@ -98,32 +98,37 @@ journalctl -u iio-sensor-proxy -f
 
 ## How it works
 
-The driver polls both MXC6655 accelerometers at 50 ms intervals via raw I2C
-(bypassing the `mxc4005` kernel driver, which it unbinds at startup). Each
-sample goes through:
+The driver polls both MXC6655 accelerometers at the `GMTR`-configured interval
+(50 ms on this firmware) via raw I2C (bypassing the `mxc4005` kernel driver,
+which it unbinds at startup). Each sample goes through:
 
 1. **Calibration** -- a 3x3 rotation matrix per sensor, loaded from the ACPI
    `GMTR` method at startup. These correct for how each sensor is physically
    mounted relative to the chassis. If `GMTR` is unavailable, hardcoded defaults
-   matching the MiniBook X layout are used.
+   matching the MiniBook X layout are used. `GMTR` also supplies the debounce
+   count and poll interval.
 
 1. **Hinge angle computation** -- the calibrated readings from both
    accelerometers are projected onto the hinge axis using `atan2`, and the
    difference gives the angle between the display and base halves. The math
-   follows the DSDT's `GMTR` routine (including its use of `180/3.14` instead of
-   the true value of pi).
+   follows the DSDT's `GMTR` routine (including its use of `180/3.14` instead
+   of the true value of pi). The Z inputs pass a median-of-3 spike filter, and
+   the angle is only computed while gravity stays off both sensors' hinge (Y)
+   axes -- up to ~64 degrees of hinge tilt, the same abstain window the stock
+   Windows driver uses.
 
 1. **Tablet mode state machine** -- the hinge angle is compared against
    thresholds (default: 185 degrees for tablet, 175 degrees for laptop) with
    debouncing. Transitions emit `SW_TABLET_MODE` via a uinput device and call
    the ACPI `LTSM` method to toggle the keyboard/touchpad at the EC level.
 
-1. **Orientation filter** -- the display accelerometer's readings pass through a
-   multi-stage pipeline (median filter, EMA smoothing, variance- based stability
-   detection, gravity offset tracking) before being classified into one of four
-   orientations (normal, left, right, inverted). A debounce counter prevents
-   rapid flickering. The final orientation is fed to iio-sensor-proxy's standard
-   callback, which exposes it over D-Bus for desktop auto-rotation.
+1. **Orientation settle gate** -- the selected accelerometer's readings must
+   be quiet and stable (a median filter plus variance check over a 20-sample
+   window) before classification into one of four orientations (normal, left,
+   right, inverted) is allowed; afterwards a debounce counter prevents rapid
+   flickering, and a large Z jump suppresses classification for one sample.
+   The final orientation is fed to iio-sensor-proxy's standard callback, which
+   exposes it over D-Bus for desktop auto-rotation.
 
    Outside tablet mode the classification result is replaced with `right-up`.
    The MiniBook X panel is mounted in portrait, so a compositor consuming
