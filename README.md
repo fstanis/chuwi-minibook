@@ -26,6 +26,9 @@ See [GUIDE.md](GUIDE.md) for the standard setup and
 [GUIDE-ADVANCED.md](GUIDE-ADVANCED.md) for manual per-component installation,
 GPU setup and display rotation details.
 
+NixOS users can install the complete stack, or select individual fixes, with
+the repository flake. See [tools/nix/NIXOS.md](tools/nix/NIXOS.md).
+
 ## Components
 
 ### [minibook_ec](docs/minibook-ec.md) - EC platform driver
