@@ -83,6 +83,21 @@ Then `sudo systemctl restart iio-sensor-proxy`. The path varies by distro
 (`/usr/lib` on Arch, `/usr/libexec` elsewhere); `systemctl cat
 iio-sensor-proxy` shows the current `ExecStart` to copy.
 
+## Orientation sensor
+
+By default, the base accelerometer's raw reading supplies screen orientation.
+To use the display accelerometer instead, add this to the same systemd override:
+
+```
+[Service]
+Environment=MINIBOOK_ORIENTATION_SENSOR=display
+```
+
+Valid values are `base` and `display`. Restart `iio-sensor-proxy` after changing
+the setting. Selection does not change sensor discovery or the calibrated
+readings used for hinge calculation. The selected raw reading has its X axis
+reversed before entering the existing orientation filter.
+
 ## Lid gating
 
 Polling stops while the lid is closed (regardless of `--lazy` or any claim) and

@@ -46,6 +46,8 @@
 #define DRM_PANEL_ORIENT_PROP	"panel orientation"
 #define MAX_DRM_CARD		4
 
+#define ENV_ORIENTATION_SENSOR	"MINIBOOK_ORIENTATION_SENSOR"
+
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
 #define GMTR_TABLET_THRESH	185.0f
 #define GMTR_LAPTOP_THRESH	175.0f
@@ -162,7 +164,24 @@ typedef struct {
 
 	/* Degrees of static panel rotation to compensate for */
 	gint               panel_deg;
+
+	/* Raw accelerometer used for orientation */
+	gint               orientation_source;
 } DrvData;
+
+static gint
+configured_orientation_source (void)
+{
+	const gchar *value = g_getenv (ENV_ORIENTATION_SENSOR);
+
+	if (value == NULL || *value == '\0' || g_str_equal (value, "base"))
+		return 0;
+	if (g_str_equal (value, "display"))
+		return 1;
+
+	g_warning ("Ignoring invalid %s=%s", ENV_ORIENTATION_SENSOR, value);
+	return 0;
+}
 
 /* Rotation the compositor already applies for a given DRM panel orientation. */
 static gint
@@ -1280,9 +1299,9 @@ poll_sensors (gpointer user_data)
 	a2 = calibrate (&raw2, drv_data->cal2);
 
 	{
-		Vec3 a1_orient = a1;
-		a1_orient.x = -a1_orient.x;
-		update_orientation_debounce (sensor_device, drv_data, &a1_orient);
+		Vec3 orient = drv_data->orientation_source == 0 ? raw1 : raw2;
+		orient.x = -orient.x;
+		update_orientation_debounce (sensor_device, drv_data, &orient);
 	}
 
 	/* Gate on the X-Z plane that compute_hinge_angle projects onto, not Y:
@@ -1334,6 +1353,7 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->prev_z1 = 1.0f;
 	drv_data->prev_z2 = 1.0f;
 	drv_data->panel_deg = detect_panel_rotation ();
+	drv_data->orientation_source = configured_orientation_source ();
 
 	/* DSDT GMTR calibration matrices (defaults) */
 	memcpy (drv_data->cal1, (gint8[]){ 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 9);
