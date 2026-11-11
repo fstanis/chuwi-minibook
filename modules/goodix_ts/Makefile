@@ -1,7 +1,6 @@
 DKMS_NAME = goodix_ts
-KVER ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 KVER_MM ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+')
-DKMS_VERSION = $(KVER)-minibook1
+DKMS_VERSION = minibook1
 DKMS_DIR = /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
 KERNEL_GIT = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain
 TOUCHSCREEN_DIR = drivers/input/touchscreen
@@ -18,18 +17,16 @@ $(SOURCES):
 
 install: .patched.stamp
 	install -Dm644 goodix_cfg.bin /lib/firmware/goodix_9110_cfg.bin
+	./purge_dkms_registrations.sh
 	rm -rf "$(DKMS_DIR)"
 	mkdir -p "$(DKMS_DIR)"
 	cp Kbuild dkms.conf $(SOURCES) "$(DKMS_DIR)/"
-	sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="$(DKMS_VERSION)"/' "$(DKMS_DIR)/dkms.conf"
-	dkms remove -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)" --all 2>/dev/null || true
 	dkms add -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
 	dkms build -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
 	dkms install --force -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
 
 uninstall:
-	dkms remove -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)" --all 2>/dev/null || true
-	rm -rf "$(DKMS_DIR)"
+	./purge_dkms_registrations.sh
 	rm -f /lib/firmware/goodix_9110_cfg.bin
 
 clean:
