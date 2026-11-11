@@ -152,13 +152,64 @@ require_running_kernel_headers() {
   exit 1
 }
 
-install_modules() {
-  local m
+# Earlier versions of this script (and the modules' own `make install`)
+# installed straight into /usr/src without going through pacman. Clean up any
+# such leftover before packaging so `pacman -U` below doesn't hit "file
+# exists" conflicts. A no-op once a module is already pacman-managed.
+clean_unpackaged_dkms_source() {
+  local dkms_name="$1"
+  local dir ver
 
+  for dir in /usr/src/"${dkms_name}"-*/; do
+    [[ -d "${dir}" ]] || continue
+    dir="${dir%/}"
+    if pacman -Qo "${dir}" &>/dev/null; then
+      continue
+    fi
+    ver="${dir#/usr/src/"${dkms_name}"-}"
+    echo "    migrating unpackaged ${dkms_name}/${ver}"
+    dkms remove "${dkms_name}/${ver}" --all 2>/dev/null || true
+    rm -rf "${dir}"
+  done
+}
+
+clean_unpackaged_file() {
+  local file="$1"
+
+  if [[ -f "${file}" ]] && ! pacman -Qo "${file}" &>/dev/null; then
+    rm -f "${file}"
+  fi
+}
+
+# -C wipes the build dir: see build_sensor_proxy_package above for why.
+build_module_package() {
+  local m="$1"
+  ( cd "${REPO_DIR}/modules/${m}/packaging/arch" && \
+    sudo -u "${SUDO_USER}" -H makepkg -fC )
+}
+
+module_package_path() {
+  local m="$1"
+  ( cd "${REPO_DIR}/modules/${m}/packaging/arch" && \
+    sudo -u "${SUDO_USER}" -H makepkg --packagelist )
+}
+
+install_modules() {
+  local m pkg
+
+  require_build_user
   for m in "${MODULES[@]}"; do
     echo "==> Installing ${m}"
-    make -C "${REPO_DIR}/modules/${m}" install
-    make -C "${REPO_DIR}/modules/${m}" enable
+    clean_unpackaged_dkms_source "${m}"
+    if [[ "${m}" == "goodix_ts" ]]; then
+      clean_unpackaged_file "${GOODIX_FIRMWARE}"
+    fi
+
+    build_module_package "${m}"
+    pkg="$(module_package_path "${m}")"
+    # Same pkgname as the repo build, so this replaces it instead of
+    # shadowing it - and self-upgrades cleanly on repeat runs.
+    pacman -U --noconfirm "${pkg}"
   done
 
   bundle_goodix_firmware
