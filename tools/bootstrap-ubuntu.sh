@@ -7,6 +7,8 @@
 #   sudo tools/bootstrap-ubuntu.sh modules    # DKMS modules only
 #   sudo tools/bootstrap-ubuntu.sh sensor     # iio-sensor-proxy only
 #   sudo tools/bootstrap-ubuntu.sh cmdline    # kernel cmdline only
+#
+# Add --panel-rotation to also rotate the panel on the kernel cmdline.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,12 +23,13 @@ readonly INITRAMFS_GOODIX_HOOK="/etc/initramfs-tools/hooks/goodix-fw"
 
 readonly MODULES=(i2c_designware_spklen goodix_ts minibook_ec dptf_enabler)
 
-# Rotate in the kernel so the boot splash and LUKS prompt come up upright too.
-readonly CMDLINE_ARGS=(
-  "video=DSI-1:panel_orientation=right_side_up"
+readonly BASE_CMDLINE_ARGS=(
   "mem_sleep_default=deep"
   "i915.enable_psr=0"
 )
+
+# Opt-in: rotation bridges like iio-niri skip some rotations on top of it.
+readonly PANEL_ROTATION_ARG="video=DSI-1:panel_orientation=right_side_up"
 
 # Console rotation does not compose additively with the panel orientation, so
 # try all four values rather than deriving one. See GUIDE-ADVANCED.md.
@@ -35,10 +38,13 @@ readonly FBCON_TMPFILES="/etc/tmpfiles.d/fbcon-rotate.conf"
 
 readonly APT_PACKAGES=(
   build-essential meson ninja-build pkgconf clang git curl patch
-  dkms "linux-headers-$(uname -r)" acpi-call-dkms
+  dkms "linux-headers-$(uname -r)"
   libglib2.0-dev libgudev-1.0-dev libpolkit-gobject-1-dev systemd-dev
   libudev-dev libdrm-dev
 )
+
+COMMAND="all"
+CMDLINE_ARGS=("${BASE_CMDLINE_ARGS[@]}")
 
 require_root() {
   if (( EUID != 0 )); then
@@ -124,18 +130,6 @@ install_packages() {
   require_running_kernel_current
 }
 
-# acpi_call only drives the tablet-mode keyboard toggle, so a module that is not
-# there yet is a warning, not a failure. See docs/iio-sensor-proxy.md.
-enable_acpi_call() {
-  echo "==> Enabling acpi_call"
-  echo acpi_call >/etc/modules-load.d/acpi_call.conf
-
-  if modprobe acpi_call; then
-    return
-  fi
-  echo "    acpi_call did not load — tablet-mode keyboard toggling stays" \
-    "off until it does" >&2
-}
 
 install_modules() {
   local m
@@ -250,13 +244,25 @@ print_next_steps() {
   echo "Read docs/vbt-patch.md before running update-vbt-clock."
 }
 
+parse_args() {
+  local arg
+
+  for arg in "$@"; do
+    if [[ "${arg}" == "--panel-rotation" ]]; then
+      CMDLINE_ARGS+=("${PANEL_ROTATION_ARG}")
+    else
+      COMMAND="${arg}"
+    fi
+  done
+}
+
 main() {
   require_root
+  parse_args "$@"
 
-  case "${1:-all}" in
+  case "${COMMAND}" in
     all)
       install_packages
-      enable_acpi_call
       install_modules
       install_sensor_proxy
       update_cmdline
@@ -264,7 +270,6 @@ main() {
       ;;
     modules)
       install_packages
-      enable_acpi_call
       install_modules
       ;;
     sensor)
@@ -275,7 +280,7 @@ main() {
       rotate_consoles
       ;;
     *)
-      echo "Usage: $0 [all|modules|sensor|cmdline]" >&2
+      echo "Usage: $0 [all|modules|sensor|cmdline] [--panel-rotation]" >&2
       exit 1
       ;;
   esac

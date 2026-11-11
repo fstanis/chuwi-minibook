@@ -1,4 +1,5 @@
 obj-m := minibook_ec.o
 minibook_ec-y := minibook_ec_core.o minibook_ec_sysfs.o \
+                 minibook_ec_acpi.o \
                  minibook_ec_thermal.o minibook_ec_fan.o \
                  minibook_ec_i2ec.o minibook_ec_kbd_backlight.o

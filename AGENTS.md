@@ -15,7 +15,7 @@ unified build system.
 | Directory                        | What it is                                                                                                    |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `modules/goodix_ts/`             | DKMS kernel module -- patches upstream Goodix touchscreen driver for resume fix + OEM config                  |
-| `modules/minibook_ec/`           | DKMS kernel module -- EC platform driver: touchpad/keyboard toggle, SoC thermal zone, EC version, BIOS unlock |
+| `modules/minibook_ec/`           | DKMS kernel module -- EC platform driver: touchpad/keyboard toggle, SoC thermal zone, EC version, BIOS unlock, ACPI method bridge (GMTR/_CRS) |
 | `modules/dptf_enabler/`          | DKMS kernel module -- unhides BIOS-gated Intel DPTF devices by setting GNVS flags                             |
 | `modules/i2c_designware_spklen/` | DKMS kernel module -- I2C spike suppression for Intel LPSS controllers                                        |
 | `thermal_daemon/`                | Fork of intel/thermal_daemon with device-specific config                                                      |

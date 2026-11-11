@@ -4,7 +4,7 @@ DKMS_DIR = /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
 
 SOURCES = minibook_ec_core.c minibook_ec_sysfs.c minibook_ec_thermal.c \
           minibook_ec_fan.c minibook_ec_i2ec.c minibook_ec_kbd_backlight.c \
-          minibook_ec.h
+          minibook_ec_acpi.c minibook_ec.h
 
 all:
 	@echo "Nothing to build (DKMS builds against the running kernel at install time)"

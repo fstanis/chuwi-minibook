@@ -95,14 +95,16 @@ desktops need a bridge daemon.
 Add to the kernel command line in `/etc/default/limine`:
 
 ```
-video=DSI-1:panel_orientation=right_side_up mem_sleep_default=deep i915.enable_psr=0
+mem_sleep_default=deep i915.enable_psr=0
 ```
 
-Then rebuild with `sudo limine-mkinitcpio`. What each does:
+Then rebuild with `sudo limine-mkinitcpio`. Add the optional
+`video=DSI-1:panel_orientation=right_side_up` only if you want a static
+rotation (see [Display rotation](#display-rotation)). What each does:
 
 | Argument                                      | Purpose                                     |
 | --------------------------------------------- | ------------------------------------------- |
-| `video=DSI-1:panel_orientation=right_side_up` | Rotate the panel; see [Display rotation](#display-rotation) |
+| `video=DSI-1:panel_orientation=right_side_up` | Optional: rotate the panel; see [Display rotation](#display-rotation) |
 | `mem_sleep_default=deep`                      | Default to S3 sleep; see [Sleep mode](#sleep-mode-s0ix-vs-s3) |
 | `i915.enable_psr=0`                           | Fix DSI link tearing; see [DSI link tearing](#dsi-link-tearing) |
 
@@ -180,6 +182,9 @@ what it reports. `tools/check-status.sh` shows the applied static rotation on
 its `panel rotation` line, and the proxy logs its decision at startup
 (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
 
+Bridges that read the screen's transform back (iio-niri) still skip some
+rotations, so prefer no static rotation at all.
+
 ### Kernel command line
 
 ```
@@ -187,8 +192,8 @@ video=DSI-1:panel_orientation=right_side_up
 ```
 
 The i915 driver applies a hardware rotation, so the boot splash, TTYs, LUKS
-prompt and login screen all come up upright. This is what the bootstrap
-scripts install. Rebuild the initramfs after editing.
+prompt and login screen all come up upright. The bootstrap scripts add it
+only with `--panel-rotation`. Rebuild the initramfs after editing.
 
 The parser accepts `normal`, `upside_down`, `left_side_up` and
 `right_side_up`. It compares only as many characters as you supply (a bare

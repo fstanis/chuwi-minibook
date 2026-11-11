@@ -25,8 +25,9 @@ sudo tools/bootstrap-arch.sh
 The script installs build dependencies, the four DKMS kernel modules
 (touchscreen fix, EC driver, DPTF enabler, I2C fix), the patched
 iio-sensor-proxy for auto-rotation and tablet mode, and the kernel command
-line arguments for display rotation, deep sleep and the PSR screen-tearing
-fix.
+line arguments for deep sleep and the PSR screen-tearing fix. Add
+`--panel-rotation` to also rotate the boot splash and LUKS prompt (see
+[GUIDE-ADVANCED.md](GUIDE-ADVANCED.md#display-rotation)).
 
 It is idempotent — safe to re-run at any time. If it stops with an error
 saying the running kernel is no longer installed, a package upgrade pulled in

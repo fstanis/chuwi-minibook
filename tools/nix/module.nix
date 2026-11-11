@@ -54,41 +54,12 @@ in
     sensorProxy = {
       enable = mkEnabledOption "Enable the MiniBook dual-accelerometer SensorProxy.";
       setConvertibleChassis = mkEnabledOption "Identify the MiniBook X as a convertible through udev.";
-      panelOrientation = lib.mkOption {
-        type = lib.types.enum [
-          "auto"
-          "normal"
-          "upside_down"
-          "left_side_up"
-          "right_side_up"
-        ];
-        default = "auto";
-        description = "Static panel orientation reported to the MiniBook sensor driver.";
-      };
-      laptopOrientation = lib.mkOption {
-        type = lib.types.enum [
-          "normal"
-          "left-up"
-          "bottom-up"
-          "right-up"
-        ];
-        default = "right-up";
-        description = "Orientation reported while the device is in laptop mode.";
-      };
-      orientationSensor = lib.mkOption {
-        type = lib.types.enum [
-          "base"
-          "display"
-        ];
-        default = "base";
-        description = "Physical accelerometer used for screen orientation.";
-      };
     };
 
     thermald.enable = mkEnabledOption "Enable the MiniBook-patched thermald.";
 
     kernelPanelOrientation = {
-      enable = mkEnabledOption "Set the built-in panel orientation through the kernel command line.";
+      enable = lib.mkEnableOption "setting the built-in panel orientation through the kernel command line";
       connector = lib.mkOption {
         type = lib.types.str;
         default = "DSI-1";
@@ -144,6 +115,10 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion = !cfg.sensorProxy.enable || cfg.minibookEc.enable;
+        message = "The MiniBook sensor proxy requires hardware.chuwi-minibook.minibookEc.enable.";
+      }
+      {
         assertion = !cfg.vbt.enable || vbtPackage != null;
         message = ''
           hardware.chuwi-minibook.vbt.enable requires either vbt.package, or
@@ -187,8 +162,7 @@ in
       lib.optionals cfg.dptfEnabler.enable [ packages.dptfEnabler ]
       ++ lib.optionals cfg.minibookEc.enable [ packages.minibookEc ]
       ++ lib.optionals cfg.i2cDesignwareSpklen.enable [ packages.i2cDesignwareSpklen ]
-      ++ lib.optionals cfg.goodix.enable [ packages.goodixTs ]
-      ++ lib.optionals cfg.sensorProxy.enable [ config.boot.kernelPackages.acpi_call ];
+      ++ lib.optionals cfg.goodix.enable [ packages.goodixTs ];
 
     boot.kernelModules =
       lib.optionals cfg.dptfEnabler.enable [ "dptf_enabler" ]
@@ -198,7 +172,6 @@ in
       ++ lib.optionals cfg.sensorProxy.enable [
         "i2c-dev"
         "uinput"
-        "acpi_call"
       ];
 
     hardware.firmware =
@@ -208,12 +181,6 @@ in
     hardware.sensor.iio = lib.mkIf cfg.sensorProxy.enable {
       enable = true;
       package = packages.iioSensorProxy;
-    };
-
-    systemd.services.iio-sensor-proxy.environment = lib.mkIf cfg.sensorProxy.enable {
-      MINIBOOK_PANEL_ORIENTATION = cfg.sensorProxy.panelOrientation;
-      MINIBOOK_LAPTOP_ORIENTATION = cfg.sensorProxy.laptopOrientation;
-      MINIBOOK_ORIENTATION_SENSOR = cfg.sensorProxy.orientationSensor;
     };
 
     services.udev.extraHwdb = lib.mkIf cfg.sensorProxy.setConvertibleChassis (

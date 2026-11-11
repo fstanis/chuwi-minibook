@@ -36,11 +36,25 @@ becomes a screen rotation depends on your desktop:
 - **GNOME and KDE Plasma (Wayland)**: built-in. Enable auto-rotate in the
   quick-settings panel / System Settings. No extra daemon needed.
 - **Niri**: install [`iio-niri`](https://github.com/Zhaith-Izaliel/iio-niri)
-  and add to one of your Niri config files (e.g.
-  `~/.config/niri/cfg/autostart.kdl`):
+  and save as `~/.config/systemd/user/iio-niri.service`:
   ```
-  spawn-at-startup "iio-niri" "listen" "--monitor" "DSI-1"
+  [Unit]
+  Description=Screen auto-rotation for niri (iio-niri)
+  PartOf=graphical-session.target
+  After=graphical-session.target
+  Requisite=graphical-session.target
+
+  [Service]
+  ExecStart=/usr/bin/iio-niri listen --monitor DSI-1
+  Restart=always
+  RestartSec=2
+
+  [Install]
+  WantedBy=niri.service
   ```
+  Then `systemctl --user enable --now iio-niri`. Optionally add
+  `transform "270"` to niri's `output "DSI-1"` block so the screen starts in
+  landscape before iio-niri connects.
 - **Sway / wlroots compositors**: use
   [`iio-sway`](https://github.com/okeri/iio-sway) (works on Sway, river,
   Wayfire) or an equivalent bridge for your compositor.
@@ -49,10 +63,12 @@ becomes a screen rotation depends on your desktop:
 
 The patched proxy reports `right-up` whenever the device is in laptop mode, so
 the compositor applies the 270° portrait correction dynamically and switches
-to live accelerometer rotation in tablet mode. A static rotation (kernel
-cmdline, VBT patch, xrandr) does not stack with this — the proxy detects and
-subtracts it, see
-[GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
+to live accelerometer rotation in tablet mode.
+
+**Don't apply any other rotation** (kernel cmdline, VBT patch, xrandr). The
+compositor would stack it on top of its own, and while the proxy compensates,
+rotation bridges like iio-niri see the combined value and skip some rotations.
+See [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
 
 ## Lazy polling (`--lazy`)
 
@@ -83,18 +99,35 @@ Then `sudo systemctl restart iio-sensor-proxy`. The path varies by distro
 (`/usr/lib` on Arch, `/usr/libexec` elsewhere); `systemctl cat
 iio-sensor-proxy` shows the current `ExecStart` to copy.
 
+## Orientation sensor
+
+The accelerometer supplying screen orientation is picked automatically: the
+driver evaluates the ACPI `ACMK._CRS` method and uses the first I2C resource
+listed -- the same "slot 1" the stock Windows driver feeds its orientation
+output from. On this firmware that is the display accelerometer, so rotation
+follows the screen whenever the two halves move independently (the hinge stays
+free past the tablet threshold). The chosen sensor is logged at startup. If
+`_CRS` cannot be evaluated or matched, the first sensor found is used and a
+warning is logged. The `MINIBOOK_ORIENTATION_SENSOR` environment variable is
+no longer honored. Selection does not change sensor discovery or the
+calibrated readings used for hinge calculation. The selected raw reading has
+its X axis reversed before entering the orientation filter.
+
 ## Lid gating
 
 Polling stops while the lid is closed (regardless of `--lazy` or any claim) and
 resumes when it opens; tablet mode is unaffected. The driver logs each
 transition to the journal: `journalctl -u iio-sensor-proxy | grep 'polling'`.
 
-## Runtime requirement
+## Runtime requirements
 
-The `acpi_call` kernel module must be loaded for tablet mode transitions (the
-driver calls ACPI method `\_SB.ACMK.LTSM` to toggle the keyboard). If
-`acpi_call` is not available, screen rotation still works but tablet mode
-toggling via ACPI is skipped.
+The [minibook_ec](minibook-ec.md) module provides everything the driver needs
+from the firmware: GMTR calibration, the `_CRS` sensor order, and tablet-mode
+keyboard toggling, all through its sysfs interface (`gmtr`, `crs`,
+`keyboard_enabled`). Without the module the driver still rotates the screen,
+using hardcoded calibration defaults and the first sensor for orientation;
+each degradation logs a warning. The out-of-tree `acpi_call` module is no
+longer used.
 
 ## Verify
 
@@ -111,39 +144,44 @@ journalctl -u iio-sensor-proxy -f
 
 ## How it works
 
-The driver polls both MXC6655 accelerometers at 50 ms intervals via raw I2C
-(bypassing the `mxc4005` kernel driver, which it unbinds at startup). Each
-sample goes through:
+The driver polls both MXC6655 accelerometers at the `GMTR`-configured interval
+(50 ms on this firmware) via raw I2C (bypassing the `mxc4005` kernel driver,
+which it unbinds at startup). Each sample goes through:
 
 1. **Calibration** -- a 3x3 rotation matrix per sensor, loaded from the ACPI
    `GMTR` method at startup. These correct for how each sensor is physically
    mounted relative to the chassis. If `GMTR` is unavailable, hardcoded defaults
-   matching the MiniBook X layout are used.
+   matching the MiniBook X layout are used. `GMTR` also supplies the debounce
+   count and poll interval.
 
 1. **Hinge angle computation** -- the calibrated readings from both
    accelerometers are projected onto the hinge axis using `atan2`, and the
    difference gives the angle between the display and base halves. The math
-   follows the DSDT's `GMTR` routine (including its use of `180/3.14` instead of
-   the true value of pi).
+   follows the DSDT's `GMTR` routine (including its use of `180/3.14` instead
+   of the true value of pi). The Z inputs pass a median-of-3 spike filter, and
+   the angle is only computed while gravity stays off both sensors' hinge (Y)
+   axes -- up to ~64 degrees of hinge tilt, the same abstain window the stock
+   Windows driver uses.
 
 1. **Tablet mode state machine** -- the hinge angle is compared against
    thresholds (default: 185 degrees for tablet, 175 degrees for laptop) with
    debouncing. Transitions emit `SW_TABLET_MODE` via a uinput device and call
    the ACPI `LTSM` method to toggle the keyboard/touchpad at the EC level.
 
-1. **Orientation filter** -- the display accelerometer's readings pass through a
-   multi-stage pipeline (median filter, EMA smoothing, variance- based stability
-   detection, gravity offset tracking) before being classified into one of four
-   orientations (normal, left, right, inverted). A debounce counter prevents
-   rapid flickering. The final orientation is fed to iio-sensor-proxy's standard
-   callback, which exposes it over D-Bus for desktop auto-rotation.
+1. **Orientation settle gate** -- the selected accelerometer's readings must
+   be quiet and stable (a median filter plus variance check over a 20-sample
+   window) before classification into one of four orientations (normal, left,
+   right, inverted) is allowed; afterwards a debounce counter prevents rapid
+   flickering, and a large Z jump suppresses classification for one sample.
+   The final orientation is fed to iio-sensor-proxy's standard callback, which
+   exposes it over D-Bus for desktop auto-rotation.
 
    Outside tablet mode the classification result is replaced with `right-up`.
    The MiniBook X panel is mounted in portrait, so a compositor consuming
    orientation events (e.g. via `iio-niri`) applies a 270° rotation in laptop
    mode and follows the accelerometer once the lid folds past the tablet
-   threshold. This removes the need for a separate static rotation fix (kernel
-   cmdline, VBT patch, xrandr); see
+   threshold. Don't add a static rotation fix on top (kernel cmdline, VBT
+   patch, xrandr); see
    [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
 
    Folding back to laptop mode emits the landscape orientation directly, instead
@@ -154,8 +192,10 @@ sample goes through:
    If a static rotation *is* already applied, the driver reads the DRM
    `panel orientation` property of the DSI connector at startup and subtracts it
    from every reported orientation, so the dynamic and static rotations do not
-   stack. The detected orientation is logged at startup (`grep 'panel
-   orientation'` in the journal).
+   stack. Bridges that read the compositor's transform back (iio-niri) still
+   skip some rotations, so this is a fallback, not a recommended setup. The
+   detected orientation is logged at startup (`grep 'panel orientation'` in
+   the journal).
 
 ## Known issues
 
