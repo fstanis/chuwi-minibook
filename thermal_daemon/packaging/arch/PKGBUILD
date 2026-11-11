@@ -3,13 +3,13 @@
 pkgname=thermald
 epoch=2
 pkgver=2.5.11.minibook1
-pkgrel=1
+pkgrel=2
 pkgdesc='Linux thermal daemon (Chuwi MiniBook X build)'
 arch=('x86_64')
 url='https://github.com/fstanis/chuwi-minibook'
 license=('GPL-2.0-or-later')
 depends=('dbus-glib' 'libevdev' 'libxml2' 'upower')
-makedepends=('autoconf' 'automake' 'gtk-doc' 'pkgconf')
+makedepends=('autoconf' 'autoconf-archive' 'automake' 'gtk-doc' 'pkgconf')
 source=()
 
 _source_root="${startdir}/../.."
@@ -23,13 +23,11 @@ pkgver() {
 
 _clean_stale_autotools_artifacts() {
   rm -f config.log config.status stamp-h1
+  rm -f data/thermald.service data/org.freedesktop.thermald.service
   find . -name Makefile -delete
 }
 
-_bootstrap_if_needed() {
-  if [[ -x ./configure ]]; then
-    return 0
-  fi
+_bootstrap() {
   NO_CONFIGURE=1 ./autogen.sh
 }
 
@@ -44,12 +42,13 @@ prepare() {
 
 build() {
   cd "${srcdir}/src"
-  _bootstrap_if_needed
+  _bootstrap
   ./configure \
     --prefix=/usr \
     --sysconfdir=/etc \
     --localstatedir=/var \
     --sbindir=/usr/bin
+  make clean
   make
 }
 

@@ -474,6 +474,104 @@ check_service() {
   echo "${status}"
 }
 
+thermald_service_property() {
+  systemctl show thermald.service --property="$1" --value 2>/dev/null
+}
+
+configured_thermald_binary() {
+  local command
+  command="$(thermald_service_property ExecStart)" || return 1
+  if [[ "${command}" =~ ^\{[[:space:]]path=([^\;[:space:]]+)[[:space:]]\; ]]; then
+    local path="${BASH_REMATCH[1]}"
+    if [[ "${path}" == /* && "${path}" != *\\* ]]; then
+      echo "${path}"
+      return
+    fi
+  fi
+  return 1
+}
+
+running_thermald_binary() {
+  local pid
+  pid="$(thermald_service_property MainPID)" || return 1
+  if [[ "${pid}" =~ ^[1-9][0-9]*$ && -x "/proc/${pid}/exe" ]]; then
+    echo "/proc/${pid}/exe"
+    return
+  fi
+  return 1
+}
+
+read_thermald_version() {
+  local output
+  if [[ ! -x "$1" ]]; then
+    echo "EXECUTABLE MISSING"
+  elif output="$("$1" --version 2>&1)" && [[ -n "${output}" ]]; then
+    echo "${output%%$'\n'*}"
+  else
+    echo "VERSION CHECK FAILED"
+  fi
+}
+
+same_executable() {
+  local selected="$1" candidate
+  shift
+  for candidate in "$@"; do
+    if [[ "${selected}" -ef "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+thermald_candidates() {
+  printf '%s\n' /usr/local/sbin/thermald /usr/sbin/thermald /usr/bin/thermald
+  type -aP thermald || true
+}
+
+check_extra_thermald_binaries() {
+  local candidate
+  local seen=("$1")
+  while IFS= read -r candidate; do
+    [[ -x "${candidate}" ]] || continue
+    if same_executable "${candidate}" "${seen[@]}"; then
+      continue
+    fi
+    seen+=("${candidate}")
+    print_detail "extra thermald executable: ${candidate}"
+    add_warning "thermald: extra executable ${candidate}"
+  done < <(thermald_candidates)
+}
+
+check_thermald() {
+  local binary configured
+  configured="$(configured_thermald_binary)" || configured=""
+  if binary="$(running_thermald_binary)"; then
+    print_thermald_status "${binary}" "running executable"
+    if [[ -n "${configured}" && ! "${binary}" -ef "${configured}" ]]; then
+      print_detail "ExecStart differs from running executable: ${configured}"
+      add_warning "thermald: check ExecStart and restart the service"
+    fi
+  elif [[ -n "${configured}" ]]; then
+    binary="${configured}"
+    print_thermald_status "${binary}" "configured executable"
+  else
+    check_service thermald "SERVICE EXECUTABLE UNKNOWN"
+    add_warning "thermald: cannot determine the service executable"
+    binary=""
+  fi
+  check_extra_thermald_binaries "${binary}"
+}
+
+print_thermald_status() {
+  local version
+  version="$(read_thermald_version "$1")"
+  check_service thermald "${version}"
+  print_detail "$2: $1"
+  if [[ "${version}" != *"${EXPECTED_MINIBOOK}"* ]]; then
+    add_warning "thermald: ${version} ($1)"
+  fi
+}
+
 read_iio_version() {
   local path
   for path in /usr/libexec/iio-sensor-proxy /usr/lib/iio-sensor-proxy; do
@@ -508,9 +606,8 @@ check_services() {
   echo "--- services ---"
   echo ""
 
-  local thermald_ver iio_ver
-  thermald_ver="$(thermald --version 2>&1 | head -1 || echo "NOT FOUND")"
-  check_service "thermald" "${thermald_ver}"
+  local iio_ver
+  check_thermald
 
   iio_ver="$(read_iio_version)"
   check_service "iio-sensor-proxy" "${iio_ver}"

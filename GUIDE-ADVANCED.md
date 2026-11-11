@@ -59,6 +59,12 @@ sudo make install && sudo make enable
 Verify with `dmesg | grep <name>`. See [minibook-ec.md](docs/minibook-ec.md)
 for the EC driver's sysfs interface.
 
+Goodix requires headers for every installed kernel. To select an upstream
+source release explicitly, use `sudo make install KVER=6.12.1`.
+
+Before switching between manual and package-managed Goodix installs, remove
+the existing install with `sudo make uninstall` or the package manager.
+
 ### 2. BIOS tweaks
 
 See [GUIDE.md](GUIDE.md#2-bios-tweaks). Required before thermald is useful.

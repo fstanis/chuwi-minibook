@@ -54,20 +54,39 @@ See [thermald.md](docs/thermald.md#bios-settings) for what these do.
 
 Patched thermal daemon. Requires steps 1 and 2.
 
+On Arch, CachyOS and Manjaro (without sudo):
+
 ```
 cd thermal_daemon
-./configure && make
-sudo make install
-sudo systemctl daemon-reload
-sudo systemctl enable --now thermald
+make install-arch
 ```
 
-On Arch and Manjaro, use `make install-arch` instead — it builds via `makepkg`
-so pacman tracks the install. Add `IgnorePkg = thermald` to `/etc/pacman.conf`
-so upgrades don't replace it with the unpatched repo build.
+Add `IgnorePkg = thermald` to `/etc/pacman.conf` so upgrades don't replace
+it with the unpatched repo build.
 
-On Debian and Ubuntu, `sudo apt remove thermald` first; on Fedora,
-`sudo dnf remove thermald` — so the distro package doesn't shadow the fork.
+On Debian and Ubuntu:
+
+```
+sudo apt install build-essential autoconf autoconf-archive automake \
+  pkg-config gtk-doc-tools libglib2.0-dev libxml2-dev libupower-glib-dev \
+  libevdev-dev systemd-dev
+sudo apt remove thermald
+cd thermal_daemon
+./autogen.sh --sysconfdir=/etc --localstatedir=/var
+make
+sudo make install
+```
+
+On Fedora, `sudo dnf remove thermald` first and install the corresponding
+build dependencies.
+
+Enable and restart:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable thermald
+sudo systemctl restart thermald
+```
 
 Verify: `journalctl -u thermald | grep minibook`. See
 [thermald.md](docs/thermald.md) for details.
