@@ -5,7 +5,7 @@ if HAVE_SYSTEMD
 systemdsystemunit_DATA = \
 	thermald.service
 
-thermald.service: thermald.service.in
+thermald.service: thermald.service.in Makefile
 	@$(service_edit) $< >$@
 
 servicedir = $(datadir)/dbus-1/system-services

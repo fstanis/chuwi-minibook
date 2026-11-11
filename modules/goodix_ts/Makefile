@@ -1,39 +1,31 @@
 DKMS_NAME = goodix_ts
-KVER ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-KVER_MM ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+')
-DKMS_VERSION = $(KVER).minibook1
-DKMS_DIR = /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
-KERNEL_GIT = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain
-TOUCHSCREEN_DIR = drivers/input/touchscreen
+KVER ?= $(shell uname -r | grep -oE '^[0-9]+\.[0-9]+(\.[0-9]+)?')
+SOURCE_VERSION = $(shell echo '$(KVER)' | sed -E 's/^([0-9]+\.[0-9]+)\.0$$/\1/')
+PATCH_REVISION = $(shell cat goodix_resume.patch Kbuild dkms.conf | sha256sum | cut -c1-12)
+DKMS_VERSION = $(SOURCE_VERSION).minibook1.$(PATCH_REVISION)
+SOURCE_DIR = .sources/$(DKMS_VERSION)
 SOURCES = goodix.c goodix.h goodix_fwupload.c
 
-all: .patched.stamp
+all: $(SOURCE_DIR)/.patched.stamp
 
-$(SOURCES):
-	curl -fsSL -o $@ "$(KERNEL_GIT)/$(TOUCHSCREEN_DIR)/$@?h=linux-$(KVER_MM).y"
+$(SOURCE_DIR)/.patched.stamp: goodix_resume.patch Kbuild dkms.conf prepare_sources.sh
+	bash prepare_sources.sh "$(SOURCE_VERSION)" "$(SOURCE_DIR)" goodix_resume.patch
 
-.patched.stamp: $(SOURCES) goodix_resume.patch
-	patch -N -p1 < goodix_resume.patch || true
-	touch $@
-
-install: .patched.stamp
-	install -Dm644 goodix_cfg.bin /lib/firmware/goodix_9110_cfg.bin
-	rm -rf "$(DKMS_DIR)"
-	mkdir -p "$(DKMS_DIR)"
-	cp Kbuild dkms.conf $(SOURCES) "$(DKMS_DIR)/"
-	sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="$(DKMS_VERSION)"/' "$(DKMS_DIR)/dkms.conf"
-	dkms remove -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)" --all 2>/dev/null || true
-	dkms add -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
-	dkms build -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
-	dkms install --force -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)"
+install: all
+	bash manage_dkms.sh install "$(DKMS_VERSION)" "$(SOURCE_DIR)"
 
 uninstall:
-	dkms remove -m "$(DKMS_NAME)" -v "$(DKMS_VERSION)" --all 2>/dev/null || true
-	rm -rf "$(DKMS_DIR)"
-	rm -f /lib/firmware/goodix_9110_cfg.bin
+	bash manage_dkms.sh uninstall
 
 clean:
+	rm -rf .sources
 	rm -f $(SOURCES) .patched.stamp
+
+dkms-version:
+	@echo "$(DKMS_VERSION)"
+
+source-dir:
+	@echo "$(SOURCE_DIR)"
 
 enable:
 	modprobe "$(DKMS_NAME)"
@@ -43,4 +35,4 @@ disable:
 	rm -f /etc/modules-load.d/$(DKMS_NAME).conf
 	modprobe -r "$(DKMS_NAME)" 2>/dev/null || true
 
-.PHONY: all install uninstall clean enable disable
+.PHONY: all install uninstall clean dkms-version source-dir enable disable

@@ -8,44 +8,40 @@ arch=('any')
 url='https://github.com/fstanis/chuwi-minibook'
 license=('GPL-2.0-only')
 depends=('dkms')
-makedepends=('curl')
+makedepends=('curl' 'patch')
 source=()
 
 _source_root="${startdir}/../.."
 _module=goodix_ts
 
 pkgver() {
-  local kver
-  kver="$(uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')"
-  echo "${kver}.minibook1"
+  make -s -C "${_source_root}" dkms-version
 }
 
 prepare() {
   rm -rf "${srcdir}/build"
   mkdir -p "${srcdir}/build"
-  cp "${_source_root}/Kbuild" \
+  cp "${_source_root}/Makefile" \
+     "${_source_root}/prepare_sources.sh" \
+     "${_source_root}/Kbuild" \
      "${_source_root}/dkms.conf" \
      "${_source_root}/goodix_resume.patch" \
      "${_source_root}/goodix_cfg.bin" \
      "${srcdir}/build/"
-  cd "${srcdir}/build"
-  local kver_mm
-  kver_mm="$(uname -r | grep -oE '^[0-9]+\.[0-9]+')"
-  local base='https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain'
-  local dir='drivers/input/touchscreen'
-  for f in goodix.c goodix.h goodix_fwupload.c; do
-    curl -fsSL -o "${f}" "${base}/${dir}/${f}?h=linux-${kver_mm}.y"
-  done
-  patch -p1 < goodix_resume.patch
+  make -C "${srcdir}/build"
 }
 
 package() {
-  local ver
-  ver="$(pkgver)"
+  cd "${srcdir}/build"
+  local ver source_dir
+  ver="$(make -s dkms-version)"
+  source_dir="$(make -s source-dir)"
   local destdir="${pkgdir}/usr/src/${_module}-${ver}"
   install -dm755 "${destdir}"
-  cd "${srcdir}/build"
-  cp Kbuild dkms.conf goodix.c goodix.h goodix_fwupload.c "${destdir}/"
-  sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${ver}\"/" "${destdir}/dkms.conf"
-  install -Dm644 goodix_cfg.bin "${pkgdir}/usr/lib/firmware/goodix_9110_cfg.bin"
+  cp Kbuild dkms.conf "${source_dir}"/goodix*.c \
+    "${source_dir}/goodix.h" "${destdir}/"
+  sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${ver}\"/" \
+    "${destdir}/dkms.conf"
+  install -Dm644 goodix_cfg.bin \
+    "${pkgdir}/usr/lib/firmware/goodix_9110_cfg.bin"
 }

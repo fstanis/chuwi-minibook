@@ -15,6 +15,7 @@ modules/goodix_ts/goodix.c
 modules/goodix_ts/goodix.h
 modules/goodix_ts/goodix_fwupload.c
 modules/goodix_ts/.patched.stamp
+modules/goodix_ts/.sources/
 
 # vbt_patch binary and downloaded headers
 vbt_patch/intel_vbt_defs.h
