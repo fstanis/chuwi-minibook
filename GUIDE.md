@@ -109,3 +109,31 @@ failure modes apart.
 GNOME and KDE Plasma pick up rotation and tablet mode automatically. On Niri,
 Sway, Hyprland and other wlroots compositors you need a small bridge daemon —
 see [iio-sensor-proxy.md](docs/iio-sensor-proxy.md#desktop-integration).
+
+#### On-screen keyboard (tablet mode)
+
+In tablet mode the physical keyboard is disabled at the EC level (see
+[minibook-ec.md](docs/minibook-ec.md#touchpad-and-keyboard)), so text input
+needs an on-screen keyboard. There is no built-in popup-on-focus mechanism on
+Niri (unlike GNOME/KDE) -- wire one up manually with `switch-events`:
+
+```
+yay -S wvkbd-deskintl
+```
+
+Add to a Niri config file (e.g. `~/.config/niri/cfg/switch-events.kdl`):
+
+```
+switch-events {
+    tablet-mode-on {
+        spawn "wvkbd-deskintl"
+    }
+    tablet-mode-off {
+        spawn "pkill" "-x" "wvkbd-deskintl"
+    }
+}
+```
+
+`wvkbd-deskintl` has no dedicated Polish layout, but every diacritic (ą ć ę ł
+ń ó ś ź ż) is reachable through the "Cmp" (Compose) key: tap `Cmp`, then the
+base letter, then pick the accented variant from the popup that appears.
