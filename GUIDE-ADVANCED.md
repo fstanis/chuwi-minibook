@@ -188,8 +188,8 @@ what it reports. `tools/check-status.sh` shows the applied static rotation on
 its `panel rotation` line, and the proxy logs its decision at startup
 (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
 
-Bridges that read the screen's transform back (iio-niri) still skip some
-rotations, so prefer no static rotation at all.
+With an unfixed iio-niri, omit kernel panel rotation on Niri to avoid skipped
+rotation updates; see [Known issues](docs/iio-sensor-proxy.md#known-issues).
 
 ### Kernel command line
 
@@ -199,7 +199,10 @@ video=DSI-1:panel_orientation=right_side_up
 
 The i915 driver applies a hardware rotation, so the boot splash, TTYs, LUKS
 prompt and login screen all come up upright. The bootstrap scripts add it
-only with `--panel-rotation`. Rebuild the initramfs after editing.
+by default unless Niri is installed, running or named in
+`XDG_CURRENT_DESKTOP`. Override detection with `--panel-rotation` or skip it
+with `--no-panel-rotation`. Neither skipping nor the opt-out flag removes an
+existing rotation argument. Rebuild the initramfs after editing.
 
 The parser accepts `normal`, `upside_down`, `left_side_up` and
 `right_side_up`. It compares only as many characters as you supply (a bare

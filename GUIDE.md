@@ -25,9 +25,13 @@ sudo tools/bootstrap-arch.sh
 The script installs build dependencies, the four DKMS kernel modules
 (touchscreen fix, EC driver, DPTF enabler, I2C fix), the patched
 iio-sensor-proxy for auto-rotation and tablet mode, and the kernel command
-line arguments for deep sleep and the PSR screen-tearing fix. Add
-`--panel-rotation` to also rotate the boot splash and LUKS prompt (see
-[GUIDE-ADVANCED.md](GUIDE-ADVANCED.md#display-rotation)).
+line arguments for deep sleep, the PSR screen-tearing fix and panel rotation.
+Panel rotation is skipped when Niri is installed, running or named in
+`XDG_CURRENT_DESKTOP`, because of the
+[iio-niri issue](docs/iio-sensor-proxy.md#known-issues). Use `--panel-rotation`
+to force it with a fixed iio-niri, or `--no-panel-rotation` to skip it on any
+desktop. Skipping leaves existing kernel arguments unchanged. See
+[GUIDE-ADVANCED.md](GUIDE-ADVANCED.md#display-rotation).
 
 It is idempotent — safe to re-run at any time. If it stops with an error
 saying the running kernel is no longer installed, a package upgrade pulled in

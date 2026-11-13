@@ -9,7 +9,7 @@
 #   sudo tools/bootstrap-arch.sh sensor     # iio-sensor-proxy only
 #   sudo tools/bootstrap-arch.sh cmdline    # kernel cmdline only
 #
-# Add --panel-rotation to also rotate the panel on the kernel cmdline.
+# Panel rotation defaults on unless Niri is detected; flags override this.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +31,6 @@ readonly BASE_CMDLINE_ARGS=(
   "i915.enable_psr=0"
 )
 
-# Opt-in: rotation bridges like iio-niri skip some rotations on top of it.
 readonly PANEL_ROTATION_ARG="video=DSI-1:panel_orientation=right_side_up"
 
 # Console rotation does not compose additively with the panel orientation, so
@@ -50,6 +49,7 @@ BOOTLOADER=""
 CMDLINE_CONF=""
 CMDLINE_KEY=""
 COMMAND="all"
+PANEL_ROTATION="auto"
 CMDLINE_ARGS=("${BASE_CMDLINE_ARGS[@]}")
 
 require_root() {
@@ -297,6 +297,7 @@ apply_bootloader_config() {
 }
 
 update_cmdline() {
+  configure_panel_rotation
   detect_bootloader
   echo "==> Updating kernel cmdline (${BOOTLOADER})"
   local arg changed=0
@@ -336,15 +337,36 @@ print_next_steps() {
   echo "Read docs/vbt-patch.md before running update-vbt-clock."
 }
 
+niri_detected() {
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+
+  case "${desktop}" in
+    *[Nn][Ii][Rr][Ii]*) return 0 ;;
+  esac
+  command -v niri &>/dev/null || pgrep -x niri &>/dev/null
+}
+
+configure_panel_rotation() {
+  if [[ "${PANEL_ROTATION}" == "off" ]]; then
+    return
+  fi
+  if [[ "${PANEL_ROTATION}" == "auto" ]] && niri_detected; then
+    echo "    Niri detected: skipping kernel panel rotation (iio-niri #14)."
+    echo "    Use --panel-rotation if your iio-niri includes the fix."
+    return
+  fi
+  CMDLINE_ARGS+=("${PANEL_ROTATION_ARG}")
+}
+
 parse_args() {
   local arg
 
   for arg in "$@"; do
-    if [[ "${arg}" == "--panel-rotation" ]]; then
-      CMDLINE_ARGS+=("${PANEL_ROTATION_ARG}")
-    else
-      COMMAND="${arg}"
-    fi
+    case "${arg}" in
+      --panel-rotation) PANEL_ROTATION="on" ;;
+      --no-panel-rotation) PANEL_ROTATION="off" ;;
+      *) COMMAND="${arg}" ;;
+    esac
   done
 }
 
@@ -374,7 +396,8 @@ main() {
       rotate_consoles
       ;;
     *)
-      echo "Usage: $0 [all|modules|sensor|cmdline] [--panel-rotation]" >&2
+      echo "Usage: $0 [all|modules|sensor|cmdline]" \
+        "[--panel-rotation|--no-panel-rotation]" >&2
       exit 1
       ;;
   esac
