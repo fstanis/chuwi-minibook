@@ -7,6 +7,12 @@ install_data(
   install_dir: udev_rules_dir
 )
 
+install_data(
+  'iio-sensor-proxy.modules-load.conf',
+  rename: 'iio-sensor-proxy.conf',
+  install_dir: prefix / 'lib' / 'modules-load.d'
+)
+
 data_conf = configuration_data()
 data_conf.set('libexecdir', libexecdir)
 data_conf.set('geoclue_user', get_option('geoclue-user'))

@@ -200,6 +200,7 @@ install_sensor_proxy() {
   make -C "${REPO_DIR}/iio-sensor-proxy"
   make -C "${REPO_DIR}/iio-sensor-proxy" install
 
+  modprobe i2c-dev
   systemctl daemon-reload
   udevadm control --reload-rules && udevadm trigger
   systemctl restart iio-sensor-proxy

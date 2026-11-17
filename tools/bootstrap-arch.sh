@@ -241,6 +241,7 @@ sensor_proxy_package_path() {
 }
 
 restart_sensor_proxy() {
+  modprobe i2c-dev
   systemctl daemon-reload
   udevadm control --reload-rules && udevadm trigger
   systemctl restart iio-sensor-proxy

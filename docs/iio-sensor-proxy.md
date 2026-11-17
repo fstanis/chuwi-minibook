@@ -120,6 +120,10 @@ transition to the journal: `journalctl -u iio-sensor-proxy | grep 'polling'`.
 
 ## Runtime requirements
 
+The driver requires `i2c-dev`, loaded automatically at boot after installation.
+Bootstrap also loads it immediately; for manual installs, run
+`sudo modprobe i2c-dev` or reboot.
+
 The [minibook_ec](minibook-ec.md) module provides everything the driver needs
 from the firmware: GMTR calibration, the `_CRS` sensor order, and tablet-mode
 keyboard toggling, all through its sysfs interface (`gmtr`, `crs`,
