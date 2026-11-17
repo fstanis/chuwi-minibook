@@ -188,8 +188,8 @@ what it reports. `tools/check-status.sh` shows the applied static rotation on
 its `panel rotation` line, and the proxy logs its decision at startup
 (`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
 
-With an unfixed iio-niri, omit kernel panel rotation on Niri to avoid skipped
-rotation updates; see [Known issues](docs/iio-sensor-proxy.md#known-issues).
+Older iio-niri versions could skip rotations with static panel rotation enabled.
+This is fixed in [iio-niri 2.3.3](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3).
 
 ### Kernel command line
 

@@ -65,9 +65,10 @@ The patched proxy reports `right-up` whenever the device is in laptop mode, so
 the compositor applies the 270° portrait correction dynamically and switches
 to live accelerometer rotation in tablet mode.
 
-**On Niri with iio-niri**, leave the Limine kernel-command-line rotation fix
-(`video=DSI-1:panel_orientation=right_side_up`) disabled unless your iio-niri
-includes the fix linked under [Known issues](#known-issues).
+Static panel rotation is optional; the proxy compensates for the DRM panel
+orientation. With iio-niri, use [version 2.3.3 or newer](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3)
+to avoid skipped rotations when combining static and dynamic rotation.
+See [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
 
 ## Lazy polling (`--lazy`)
 
@@ -184,8 +185,7 @@ which it unbinds at startup). Each sample goes through:
    orientation events (e.g. via `iio-niri`) applies a 270° rotation in laptop
    mode and follows the accelerometer once the lid folds past the tablet
    threshold. Static panel rotation can also cover the boot splash and login
-   screen; see [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation)
-   and the iio-niri exception under [Known issues](#known-issues).
+   screen; see [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
 
    Folding back to laptop mode emits the landscape orientation directly, instead
    of waiting for the accelerometer pipeline to settle. Compositors that only
@@ -195,16 +195,17 @@ which it unbinds at startup). Each sample goes through:
    If a static rotation *is* already applied, the driver reads the DRM
    `panel orientation` property of the DSI connector at startup and subtracts it
    from every reported orientation, so the dynamic and static rotations do not
-   stack. The detected orientation is logged at startup (`grep 'panel
-   orientation'` in the journal).
+   stack. With iio-niri, this requires version 2.3.3 or newer to avoid skipped
+   rotations. The detected orientation is logged at startup
+   (`grep 'panel orientation'` in the journal).
 
 ## Known issues
 
 **Niri / iio-niri:** with kernel panel rotation enabled, Niri reports a
 transform that combines the panel orientation with the applied transform.
-iio-niri compares this value with the requested transform and can incorrectly
-skip an update. Until your iio-niri includes the fix proposed in
-[PR #14](https://github.com/Zhaith-Izaliel/iio-niri/pull/14), omit
+iio-niri versions before 2.3.3 compare this value with the requested transform
+and can incorrectly skip an update. Upgrade to
+[2.3.3 or newer](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3), or omit
 `video=DSI-1:panel_orientation=right_side_up` from Limine's kernel command
 line (or the equivalent setting in another bootloader). The proxy's panel
 compensation does not need to be disabled.
