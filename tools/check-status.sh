@@ -9,6 +9,7 @@ readonly EXPECTED_CPU="Intel(R) N150"
 readonly EXPECTED_DRI_PCI="0000:00:02.0"
 readonly DRI_DRIVER="i915"
 readonly STOCK_VBT_CLOCK=1368870
+readonly MIN_IIO_NIRI_VERSION="2.3.3"
 
 
 has_cmd() { command -v "$1" &>/dev/null; }
@@ -601,6 +602,50 @@ check_iio_polling() {
   fi
 }
 
+is_niri_session() {
+  local desktop="${XDG_CURRENT_DESKTOP:-}"
+  if [[ -n "${NIRI_SOCKET:-}" || "${desktop,,}" == *niri* ]]; then
+    return 0
+  fi
+  pgrep -x niri &>/dev/null
+}
+
+iio_niri_version_supported() {
+  local version="$1" oldest
+  if [[ "${version}" == "${MIN_IIO_NIRI_VERSION}-"* ]]; then
+    return 1
+  fi
+  oldest="$(printf '%s\n' "${MIN_IIO_NIRI_VERSION}" "${version}" \
+    | sort -V | head -n1)"
+  [[ "${oldest}" == "${MIN_IIO_NIRI_VERSION}" ]]
+}
+
+check_iio_niri() {
+  local output version
+  if ! is_niri_session; then
+    return
+  fi
+  if ! output="$(iio-niri --version 2>/dev/null)"; then
+    print_warn "iio-niri" "not found or unable to read version"
+    return
+  fi
+  if [[ ! "${output}" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[[:alnum:].-]+)?) ]]; then
+    print_warn "iio-niri" "unrecognized version: ${output}"
+    return
+  fi
+  version="${BASH_REMATCH[1]}"
+  report_iio_niri_version "${version}"
+}
+
+report_iio_niri_version() {
+  if iio_niri_version_supported "$1"; then
+    print_field "iio-niri" "$1"
+    return
+  fi
+  print_warn "iio-niri" \
+    "$1 (use ${MIN_IIO_NIRI_VERSION}+ to avoid skipped rotations)"
+}
+
 check_services() {
   echo ""
   echo "--- services ---"
@@ -612,6 +657,7 @@ check_services() {
   iio_ver="$(read_iio_version)"
   check_service "iio-sensor-proxy" "${iio_ver}"
   check_iio_polling
+  check_iio_niri
 }
 
 print_warnings() {

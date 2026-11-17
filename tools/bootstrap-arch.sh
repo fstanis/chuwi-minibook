@@ -31,6 +31,7 @@ readonly BASE_CMDLINE_ARGS=(
   "i915.enable_psr=0"
 )
 
+# Opt-in: combining with iio-niri requires 2.3.3+ to avoid skipped rotations.
 readonly PANEL_ROTATION_ARG="video=DSI-1:panel_orientation=right_side_up"
 
 # Console rotation does not compose additively with the panel orientation, so
@@ -241,6 +242,7 @@ sensor_proxy_package_path() {
 }
 
 restart_sensor_proxy() {
+  modprobe i2c-dev
   systemctl daemon-reload
   udevadm control --reload-rules && udevadm trigger
   systemctl restart iio-sensor-proxy

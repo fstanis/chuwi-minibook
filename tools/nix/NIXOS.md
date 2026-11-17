@@ -50,8 +50,8 @@ Kernel panel rotation, VBT changes and the Mutter patch are opt-in.
 ## Display rotation
 
 The proxy reports laptop orientation automatically and follows the display
-accelerometer in tablet mode. Leave static rotation disabled for rotation
-bridges such as iio-niri; see [desktop integration](../../docs/iio-sensor-proxy.md#desktop-integration).
+accelerometer in tablet mode. When enabling static panel rotation with iio-niri,
+use version 2.3.3 or newer; see [desktop integration](../../docs/iio-sensor-proxy.md#desktop-integration).
 
 To opt into kernel panel rotation for the boot splash or encrypted-root prompt:
 
