@@ -31,7 +31,7 @@ readonly BASE_CMDLINE_ARGS=(
   "i915.enable_psr=0"
 )
 
-# Opt-in: combining with iio-niri requires 2.3.3+ to avoid skipped rotations.
+# Opt-in: iio-niri needs 2.3.3+ and an offset mapping (see desktop integration).
 readonly PANEL_ROTATION_ARG="video=DSI-1:panel_orientation=right_side_up"
 
 # Console rotation does not compose additively with the panel orientation, so
@@ -306,6 +306,12 @@ update_cmdline() {
 
   backup_conf "${CMDLINE_CONF}"
 
+  if [[ "${PANEL_ROTATION}" == "off" ]] \
+    && grep -qF "${PANEL_ROTATION_ARG}" "${CMDLINE_CONF}"; then
+    sed -i "/^${CMDLINE_KEY}/s| ${PANEL_ROTATION_ARG}||g" "${CMDLINE_CONF}"
+    changed=1
+  fi
+
   for arg in "${CMDLINE_ARGS[@]}"; do
     if grep -qF -- "${arg}" "${CMDLINE_CONF}"; then
       continue
@@ -333,6 +339,11 @@ print_next_steps() {
   echo
   echo "Done — reboot to apply the kernel cmdline."
   echo "thermald needs BIOS changes first, see GUIDE.md."
+  if niri_detected; then
+    echo "Niri + kernel/VBT rotation: use iio-niri 2.3.3+ and"
+    echo "  --transform 90 180 270 normal (right-side-up panel)."
+    echo "See docs/iio-sensor-proxy.md for the startup transform."
+  fi
   echo
   echo "The VBT refresh rate is deliberately NOT applied here: a raised pixel"
   echo "clock can pass a cold boot and still fail on the first suspend."
@@ -353,8 +364,8 @@ configure_panel_rotation() {
     return
   fi
   if [[ "${PANEL_ROTATION}" == "auto" ]] && niri_detected; then
-    echo "    Niri detected: skipping kernel panel rotation (iio-niri #14)."
-    echo "    Use --panel-rotation if your iio-niri includes the fix."
+    echo "    Niri detected: not adding kernel panel rotation."
+    echo "    Existing kernel/VBT rotation is kept; see Niri setup instructions."
     return
   fi
   CMDLINE_ARGS+=("${PANEL_ROTATION_ARG}")

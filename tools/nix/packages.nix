@@ -243,10 +243,9 @@ in
     vbtPatch
     ;
 
-  iioSensorProxy = pkgs.iio-sensor-proxy.overrideAttrs (oldAttrs: {
+  iioSensorProxy = pkgs.iio-sensor-proxy.overrideAttrs (_oldAttrs: {
     version = "3.9.minibook1";
     src = "${source}/iio-sensor-proxy";
-    buildInputs = (oldAttrs.buildInputs or [ ]) ++ [ pkgs.libdrm ];
   });
 
   thermald = pkgs.thermald.overrideAttrs (_oldAttrs: {

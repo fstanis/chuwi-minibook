@@ -54,21 +54,47 @@ becomes a screen rotation depends on your desktop:
   ```
   Then `systemctl --user enable --now iio-niri`. Optionally add
   `transform "270"` to niri's `output "DSI-1"` block so the screen starts in
-  landscape before iio-niri connects.
-- **Sway / wlroots compositors**: use
-  [`iio-sway`](https://github.com/okeri/iio-sway) (works on Sway, river,
-  Wayfire) or an equivalent bridge for your compositor.
+  landscape before iio-niri connects. These defaults assume no DRM panel
+  rotation; with kernel or VBT rotation, use the mapping below instead.
+- **Sway**: use [`iio-sway`](https://github.com/okeri/iio-sway).
+  It sets an absolute output transform, overriding the panel default.
 - **Hyprland**: use
   [`iio-hyprland`](https://github.com/JeanSchoeller/iio-hyprland).
+  It sets the monitor transform directly; no Niri-style panel offset is needed.
 
 The patched proxy reports `right-up` whenever the device is in laptop mode, so
 the compositor applies the 270° portrait correction dynamically and switches
 to live accelerometer rotation in tablet mode.
 
-Static panel rotation is optional; the proxy compensates for the DRM panel
-orientation. With iio-niri, use [version 2.3.3 or newer](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3)
-to avoid skipped rotations when combining static and dynamic rotation.
+Static panel rotation is optional. The proxy reports orientations relative to
+the native panel, independently of DRM panel orientation. GNOME/Mutter and
+KDE/KWin handle these readings without proxy-side compensation.
 See [GUIDE-ADVANCED.md](../GUIDE-ADVANCED.md#display-rotation).
+
+### Niri with kernel or VBT panel rotation
+
+With `video=DSI-1:panel_orientation=right_side_up` or equivalent VBT rotation:
+
+1. Install [iio-niri 2.3.3+](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3).
+2. Replace the user service's `ExecStart` with:
+   ```ini
+   ExecStart=/usr/bin/iio-niri listen --monitor DSI-1 --transform 90 180 270 normal
+   ```
+3. Remove `transform "270"` from niri's `output "DSI-1"` block (or use
+   `transform "normal"`), then reload the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart iio-niri
+```
+
+Niri adds the panel rotation to the requested transform, so it needs this
+offset; upgrading alone does not fix the mapping. Without DRM panel rotation,
+use the default service above. Check `tools/check-status.sh` if unsure.
+Limine's boot-menu-only `interface_rotation` needs no offset.
+
+Test all four tablet orientations and return to laptop mode: `monitor-sensor`
+should report `right-up`, and `niri msg outputs` should show 270°.
 
 ## Lazy polling (`--lazy`)
 
@@ -192,25 +218,20 @@ which it unbinds at startup). Each sample goes through:
    rotate when a reading arrives would stay in the last tablet rotation
    otherwise.
 
-   If a static rotation *is* already applied, the driver reads the DRM
-   `panel orientation` property of the DSI connector at startup and subtracts it
-   from every reported orientation, so the dynamic and static rotations do not
-   stack. With iio-niri, this requires version 2.3.3 or newer to avoid skipped
-   rotations. The detected orientation is logged at startup
-   (`grep 'panel orientation'` in the journal).
+   The driver does not subtract DRM panel orientation from its readings.
+   Mutter converts the native-panel transform into logical coordinates before
+   applying it; KWin uses the sensor transform directly. Niri's bridge needs
+   the explicit mapping described above when DRM panel rotation is enabled.
 
 ## Known issues
 
-**Niri / iio-niri:** with kernel panel rotation enabled, Niri reports a
-transform that combines the panel orientation with the applied transform.
-iio-niri versions before 2.3.3 compare this value with the requested transform
-and can incorrectly skip an update. Upgrade to
-[2.3.3 or newer](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3), or omit
-`video=DSI-1:panel_orientation=right_side_up` from Limine's kernel command
-line (or the equivalent setting in another bootloader). The proxy's panel
-compensation does not need to be disabled.
+**iio-niri before 2.3.3:** can skip rotations with DRM panel rotation enabled.
+Upgrade and use the [mapping above](#niri-with-kernel-or-vbt-panel-rotation),
+or disable kernel/VBT panel rotation.
 
 Per https://github.com/fstanis/chuwi-minibook/issues/10#issuecomment-5690525031
 there's [a known issue](https://gitlab.gnome.org/GNOME/mutter/-/issues/4650) in
 [Mutter](https://mutter.gnome.org) which applies the wrong rotation when
-returning from tablet mode back into laptop mode.
+returning from tablet mode back into laptop mode, even when SensorProxy reports
+`right-up`. Removing proxy-side panel compensation does not fix this separate
+transition bug; see the [Mutter fix](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/4898).

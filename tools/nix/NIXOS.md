@@ -51,7 +51,8 @@ Kernel panel rotation, VBT changes and the Mutter patch are opt-in.
 
 The proxy reports laptop orientation automatically and follows the display
 accelerometer in tablet mode. When enabling static panel rotation with iio-niri,
-use version 2.3.3 or newer; see [desktop integration](../../docs/iio-sensor-proxy.md#desktop-integration).
+use version 2.3.3 or newer and the offset mapping in
+[Niri setup](../../docs/iio-sensor-proxy.md#niri-with-kernel-or-vbt-panel-rotation).
 
 To opt into kernel panel rotation for the boot splash or encrypted-root prompt:
 
@@ -163,7 +164,7 @@ hardware.chuwi-minibook.sensorProxy = {
 SensorProxy requires `minibookEc.enable = true` for firmware calibration,
 orientation sensor selection and keyboard toggling. The driver detects panel
 orientation through DRM and selects the accelerometer through ACPI `_CRS`.
-Laptop orientation is fixed to `right-up` before panel compensation.
+Laptop orientation is fixed to `right-up`, independently of DRM panel orientation.
 
 ## Components
 
