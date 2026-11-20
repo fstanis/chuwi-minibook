@@ -19,9 +19,6 @@
 #include <linux/uinput.h>
 #include <linux/input.h>
 
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-
 /* MXC6655 I2C registers */
 #define MXC6655_ADDR		0x15
 #define MXC6655_REG_XOUT	0x03	/* 6 bytes: XH,XL,YH,YL,ZH,ZL */
@@ -38,15 +35,6 @@
 #define MAX_INPUT_DEV		32
 #define LID_SWITCH_NAME		"Lid Switch"
 #define UINPUT_DEV_NAME		"MXC6655 Tablet Mode Control"
-
-/* DRM_MODE_PANEL_ORIENTATION_* values (uapi/drm/drm_mode.h) */
-#define PANEL_ORIENT_UNKNOWN	-1
-#define PANEL_ORIENT_NORMAL	0
-#define PANEL_ORIENT_BOTTOM_UP	1
-#define PANEL_ORIENT_LEFT_UP	2
-#define PANEL_ORIENT_RIGHT_UP	3
-#define DRM_PANEL_ORIENT_PROP	"panel orientation"
-#define MAX_DRM_CARD		4
 
 /* GMTR PARB thresholds from DSDT \_SB.ACMK.GMTR */
 #define GMTR_TABLET_THRESH	185.0f
@@ -142,126 +130,10 @@ typedef struct {
 	gint               orient_debounce;
 	gint               pending_orient;
 
-	/* Degrees of static panel rotation to compensate for */
-	gint               panel_deg;
-
 	/* Raw accelerometer used for orientation (ACPI _CRS slot 1) */
 	gint               rotation_idx;
 	gchar             *rotation_controller;
 } DrvData;
-
-/* Rotation the compositor already applies for a given DRM panel orientation. */
-static gint
-panel_orient_degrees (gint drm_orient)
-{
-	switch (drm_orient) {
-	case PANEL_ORIENT_LEFT_UP:
-		return 90;
-	case PANEL_ORIENT_BOTTOM_UP:
-		return 180;
-	case PANEL_ORIENT_RIGHT_UP:
-		return 270;
-	default:
-		return 0;
-	}
-}
-
-/* Subtract the statically-applied panel rotation from a sensor orientation. */
-static gint
-compose_orientation (gint mxc_orient, gint panel_deg)
-{
-	gint deg = ((mxc_orient * 90 - panel_deg) % 360 + 360) % 360;
-
-	return deg / 90;
-}
-
-static gint
-connector_panel_orientation (gint fd, drmModeConnectorPtr conn)
-{
-	for (gint i = 0; i < conn->count_props; i++) {
-		drmModePropertyPtr prop = drmModeGetProperty (fd, conn->props[i]);
-		gint value = PANEL_ORIENT_UNKNOWN;
-
-		if (prop == NULL)
-			continue;
-		if (strcmp (prop->name, DRM_PANEL_ORIENT_PROP) == 0)
-			value = (gint) conn->prop_values[i];
-		drmModeFreeProperty (prop);
-		if (value != PANEL_ORIENT_UNKNOWN)
-			return value;
-	}
-	return PANEL_ORIENT_UNKNOWN;
-}
-
-static gint
-card_panel_orientation (gint fd)
-{
-	drmModeResPtr res = drmModeGetResources (fd);
-	gint orient = PANEL_ORIENT_UNKNOWN;
-
-	if (res == NULL)
-		return PANEL_ORIENT_UNKNOWN;
-
-	for (gint i = 0; i < res->count_connectors; i++) {
-		drmModeConnectorPtr conn;
-
-		conn = drmModeGetConnectorCurrent (fd, res->connectors[i]);
-		if (conn == NULL)
-			continue;
-		if (conn->connector_type == DRM_MODE_CONNECTOR_DSI)
-			orient = connector_panel_orientation (fd, conn);
-		drmModeFreeConnector (conn);
-		if (orient != PANEL_ORIENT_UNKNOWN)
-			break;
-	}
-
-	drmModeFreeResources (res);
-	return orient;
-}
-
-static gint
-read_panel_orientation (void)
-{
-	for (gint card = 0; card < MAX_DRM_CARD; card++) {
-		g_autofree gchar *path = g_strdup_printf ("/dev/dri/card%d", card);
-		gint fd = open (path, O_RDONLY | O_CLOEXEC);
-		gint orient;
-
-		if (fd < 0)
-			continue;
-
-		orient = card_panel_orientation (fd);
-		close (fd);
-		if (orient != PANEL_ORIENT_UNKNOWN)
-			return orient;
-	}
-	return PANEL_ORIENT_UNKNOWN;
-}
-
-/*
- * Detect a statically-applied panel rotation (VBT patch, kernel cmdline
- * panel_orientation=, or an i915 quirk) so the driver does not stack its
- * own dynamic rotation on top of it.
- */
-static gint
-detect_panel_rotation (void)
-{
-	gint drm_orient = read_panel_orientation ();
-	gint deg;
-
-	if (drm_orient == PANEL_ORIENT_UNKNOWN) {
-		g_message ("MXC6655: DRM panel orientation unknown, no compensation");
-		return 0;
-	}
-
-	deg = panel_orient_degrees (drm_orient);
-	g_message ("MXC6655: DRM panel orientation %d, compensating sensor "
-		   "output by %d°, laptop mode reports orientation %d",
-		   drm_orient, deg,
-		   compose_orientation (MXC_ORIENT_RIGHT, deg));
-
-	return deg;
-}
 
 static gint
 i2c_xfer (gint fd, guint8 reg, guint8 *buf, gint len)
@@ -914,8 +786,6 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 	if (drv_data->mode != 1)
 		new_orient = MXC_ORIENT_RIGHT;
 
-	new_orient = compose_orientation (new_orient, drv_data->panel_deg);
-
 	if (new_orient != drv_data->pending_orient) {
 		drv_data->pending_orient = new_orient;
 		drv_data->orient_debounce = (new_orient != drv_data->cur_orient) ? 1 : 0;
@@ -931,8 +801,7 @@ update_orientation_debounce (SensorDevice *sensor_device, DrvData *drv_data,
 
 		drv_data->cur_orient = new_orient;
 		drv_data->orient_debounce = 0;
-		g_debug ("Orientation changed to %d (panel_deg=%d)",
-			 new_orient, drv_data->panel_deg);
+		g_debug ("Orientation changed to %d", new_orient);
 
 		build_synthetic_readings (new_orient, &readings);
 		sensor_device->callback_func (sensor_device,
@@ -950,7 +819,7 @@ static void
 force_landscape (SensorDevice *sensor_device)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
-	gint orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+	gint orient = MXC_ORIENT_RIGHT;
 
 	drv_data->cur_orient = orient;
 	drv_data->pending_orient = orient;
@@ -1080,7 +949,6 @@ mxc6655_open (GUdevDevice *device)
 	drv_data->pending_orient = -1;
 	drv_data->prev_z1 = 1.0f;
 	drv_data->prev_z2 = 1.0f;
-	drv_data->panel_deg = detect_panel_rotation ();
 	drv_data->rotation_idx = 0;
 
 	/* DSDT GMTR calibration matrices (defaults) */
@@ -1152,7 +1020,7 @@ send_current_reading (SensorDevice *sensor_device)
 	gint orient = drv_data->cur_orient;
 
 	if (orient < 0)
-		orient = compose_orientation (MXC_ORIENT_RIGHT, drv_data->panel_deg);
+		orient = MXC_ORIENT_RIGHT;
 
 	emit_orientation (sensor_device, orient);
 }

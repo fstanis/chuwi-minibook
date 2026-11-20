@@ -177,19 +177,17 @@ orientation, so everything needs a 270° rotation.
 
 If your compositor consumes iio-sensor-proxy orientation events (see
 [iio-sensor-proxy.md](docs/iio-sensor-proxy.md#desktop-integration)), the
-desktop needs no configuration: the patched proxy reports `right-up` in laptop
+patched proxy reports `right-up` in laptop
 mode and live accelerometer rotation in tablet mode. The static methods below
 cover what a compositor cannot reach — the boot splash, TTYs and the LUKS
 passphrase prompt — or replace the proxy entirely.
 
-Static and dynamic rotation do not stack: the proxy reads the DRM
-`panel orientation` property at startup and subtracts any static rotation from
-what it reports. `tools/check-status.sh` shows the applied static rotation on
-its `panel rotation` line, and the proxy logs its decision at startup
-(`journalctl -u iio-sensor-proxy | grep 'panel orientation'`).
-
-Older iio-niri versions could skip rotations with static panel rotation enabled.
-This is fixed in [iio-niri 2.3.3](https://github.com/Zhaith-Izaliel/iio-niri/releases/tag/v2.3.3).
+The proxy reports native-panel orientation without subtracting static rotation.
+GNOME and KDE handle this directly. Niri users combining kernel or VBT panel
+rotation with auto-rotation need iio-niri 2.3.3 or newer **and an offset mapping**;
+see [Niri setup](docs/iio-sensor-proxy.md#niri-with-kernel-or-vbt-panel-rotation).
+`tools/check-status.sh` shows the effective DRM orientation on its
+`panel rotation` line. Limine boot-menu rotation alone needs no mapping change.
 
 ### Kernel command line
 
