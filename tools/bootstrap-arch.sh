@@ -20,6 +20,16 @@ readonly GRUB_CONF="/etc/default/grub"
 readonly PACMAN_CONF="/etc/pacman.conf"
 readonly SENSOR_PKG_DIR="${REPO_DIR}/iio-sensor-proxy/packaging/arch"
 
+# Left behind by a pre-pacman manual `meson install`; block the package build
+# the same way a raw goodix_ts install blocks its firmware file below.
+readonly SENSOR_PROXY_UNPACKAGED=(
+  /usr/bin/monitor-sensor
+  /usr/lib/systemd/system/iio-sensor-proxy.service
+  /usr/lib/udev/rules.d/80-iio-sensor-proxy.rules
+  /usr/share/dbus-1/system.d/net.hadess.SensorProxy.conf
+  /usr/share/polkit-1/actions/net.hadess.SensorProxy.policy
+)
+
 readonly GOODIX_FIRMWARE="/lib/firmware/goodix_9110_cfg.bin"
 readonly MKINITCPIO_CONF="/etc/mkinitcpio.conf"
 readonly DRACUT_GOODIX_CONF="/etc/dracut.conf.d/91-goodix-fw.conf"
@@ -251,6 +261,12 @@ restart_sensor_proxy() {
 install_sensor_proxy() {
   echo "==> Installing patched iio-sensor-proxy"
   require_build_user
+
+  local f
+  for f in "${SENSOR_PROXY_UNPACKAGED[@]}"; do
+    clean_unpackaged_file "${f}"
+  done
+
   build_sensor_proxy_package
 
   local pkg
