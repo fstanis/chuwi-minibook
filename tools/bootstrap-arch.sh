@@ -8,6 +8,11 @@
 #   sudo tools/bootstrap-arch.sh modules    # DKMS modules only
 #   sudo tools/bootstrap-arch.sh sensor     # iio-sensor-proxy only
 #   sudo tools/bootstrap-arch.sh cmdline    # kernel cmdline only
+#   sudo tools/bootstrap-arch.sh greeter    # greetd + noctalia-greeter login screen
+#
+# greeter is opt-in, not part of the default run: switching the system login
+# manager is a deliberate choice, not something a bootstrap script should do
+# on the side.
 #
 # Panel rotation defaults on unless Niri is detected; flags override this.
 set -euo pipefail
@@ -55,6 +60,15 @@ readonly PACMAN_PACKAGES=(
   glib2-devel libgudev libdrm polkit libssc
   gtk-doc docbook-xsl
 )
+
+readonly LOGIN_STACK_PACKAGES=(seatd greetd noctalia-greeter)
+readonly GREETD_CONFIG="/etc/greetd/config.toml"
+readonly GREETER_HOME="/var/lib/greeter"
+readonly NIRI_SESSION="/usr/bin/niri-session"
+readonly NIRI_SESSION_BACKUP="${NIRI_SESSION}.orig-pre-import-env-fix"
+readonly NIRI_SESSION_PATCH_MARKER="HACK: The following line has been automatically patched by a pacman hook"
+readonly NIRI_HOOK="/etc/pacman.d/hooks/niri-import-environment-patch.hook"
+readonly OTHER_DISPLAY_MANAGERS=(sddm gdm lightdm lxdm)
 
 BOOTLOADER=""
 CMDLINE_CONF=""
@@ -351,6 +365,129 @@ rotate_consoles() {
   systemd-tmpfiles --create "${FBCON_TMPFILES}" || true
 }
 
+# seatd is the seat backend Niri prefers. Without it, switching VTs between
+# the greeter and an already-running Niri session can wedge Niri's DRM output
+# permanently (Page flip commit failed ... Permission denied, needs a hard
+# reset) -- libseat falling back to logind does not hand DRM master back and
+# forth reliably on this hardware. Any second compositor grabbing a VT hits
+# this, not just a Niri-vs-Niri conflict.
+add_seat_group() {
+  local user="$1"
+
+  if ! id "${user}" &>/dev/null; then
+    return
+  fi
+  if id -nG "${user}" | grep -qw seat; then
+    return
+  fi
+  usermod -aG seat "${user}"
+  echo "    added ${user} to the seat group"
+}
+
+# greetd's greeter system user defaults to / as its home; GTK/Qt-based
+# greeters abort (SIGABRT) trying to create cache/config directories there.
+fix_greeter_home() {
+  if [[ "$(getent passwd greeter | cut -d: -f6)" == "${GREETER_HOME}" ]]; then
+    return
+  fi
+  mkdir -p "${GREETER_HOME}"
+  chown greeter:greeter "${GREETER_HOME}"
+  usermod -d "${GREETER_HOME}" greeter
+  echo "    set greeter home to ${GREETER_HOME}"
+}
+
+write_greetd_config() {
+  if [[ -f "${GREETD_CONFIG}" ]]; then
+    echo "    ${GREETD_CONFIG} already exists, leaving it alone"
+    return
+  fi
+  mkdir -p "$(dirname "${GREETD_CONFIG}")"
+  cat >"${GREETD_CONFIG}" <<'EOF'
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/bin/noctalia-greeter-session -- --session niri"
+user = "greeter"
+EOF
+  echo "    wrote ${GREETD_CONFIG}"
+}
+
+disable_other_display_managers() {
+  local dm
+  for dm in "${OTHER_DISPLAY_MANAGERS[@]}"; do
+    if systemctl is-enabled --quiet "${dm}" 2>/dev/null; then
+      systemctl disable "${dm}"
+      echo "    disabled ${dm} (replaced by greetd)"
+    fi
+  done
+}
+
+# The VT-switch flash during the greeter-to-session handoff is a known,
+# long-standing niri issue (niri-wm/niri#254): niri-session calls
+# `systemctl --user import-environment` with no variable list, which prints
+# a deprecation warning straight to the raw console before niri grabs the
+# display. The maintainer declined to change the default but endorsed
+# patching niri-session locally. The pacman hook re-applies the patch on
+# every niri package update; apply it once by hand here too since the hook
+# only fires on a transaction, not on an already-installed niri-session.
+install_niri_import_environment_hook() {
+  mkdir -p "$(dirname "${NIRI_HOOK}")"
+  cat >"${NIRI_HOOK}" <<EOF
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = niri
+
+[Action]
+Description = Patch niri-session import-environment deprecation warning
+When = PostTransaction
+Exec = /usr/bin/env sed -i "s@ systemctl --user import-environment\$@ # ${NIRI_SESSION_PATCH_MARKER}\\n SYSTEMD_COLORS=true systemctl --user import-environment 2>\\&1 | grep -v 'Calling import-environment without a list of variable names is deprecated.'@" ${NIRI_SESSION}
+EOF
+  echo "    installed ${NIRI_HOOK}"
+
+  if [[ ! -f "${NIRI_SESSION}" ]]; then
+    return
+  fi
+  if grep -qF "${NIRI_SESSION_PATCH_MARKER}" "${NIRI_SESSION}"; then
+    return
+  fi
+  if [[ ! -f "${NIRI_SESSION_BACKUP}" ]]; then
+    cp -a "${NIRI_SESSION}" "${NIRI_SESSION_BACKUP}"
+  fi
+  sed -i "s@ systemctl --user import-environment\$@ # ${NIRI_SESSION_PATCH_MARKER}\n SYSTEMD_COLORS=true systemctl --user import-environment 2>\&1 | grep -v 'Calling import-environment without a list of variable names is deprecated.'@" \
+    "${NIRI_SESSION}"
+  echo "    patched ${NIRI_SESSION} (VT-switch text flash fix)"
+}
+
+install_login_stack() {
+  echo "==> Installing greetd + noctalia-greeter login screen"
+  if [[ -z "${SUDO_USER:-}" || "${SUDO_USER}" == "root" ]]; then
+    echo "Run this script with sudo from your normal user account:" \
+      "need a real user to add to the seat group" >&2
+    exit 1
+  fi
+
+  pacman -S --needed --noconfirm "${LOGIN_STACK_PACKAGES[@]}"
+
+  add_seat_group "${SUDO_USER}"
+  add_seat_group greeter
+  systemctl enable --now seatd
+
+  fix_greeter_home
+  write_greetd_config
+  disable_other_display_managers
+  systemctl enable greetd
+
+  install_niri_import_environment_hook
+
+  echo "    Reboot required: seat group membership and the new display" \
+    "manager only take effect after a reboot."
+  echo "    Rotation and scale for the login screen itself are documented in" \
+    "GUIDE.md ('Login screen'); sudo tools/check-status.sh verifies this setup."
+}
+
 print_next_steps() {
   echo
   echo "Done — reboot to apply the kernel cmdline."
@@ -424,8 +561,12 @@ main() {
       update_cmdline
       rotate_consoles
       ;;
+    greeter)
+      install_login_stack
+      return
+      ;;
     *)
-      echo "Usage: $0 [all|modules|sensor|cmdline]" \
+      echo "Usage: $0 [all|modules|sensor|cmdline|greeter]" \
         "[--panel-rotation|--no-panel-rotation]" >&2
       exit 1
       ;;

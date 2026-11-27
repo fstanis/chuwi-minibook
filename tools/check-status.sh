@@ -660,6 +660,93 @@ check_services() {
   check_iio_niri
 }
 
+# --- login stack (greetd + noctalia-greeter) ---
+
+# seatd is the seat backend Niri prefers; without it, switching VTs between
+# the greeter and an already-running Niri session can wedge Niri's DRM
+# output permanently. Any second compositor grabbing a VT hits this, not
+# just a Niri-vs-Niri conflict -- see GUIDE.md ("Login screen").
+check_seatd() {
+  if ! has_cmd seatd; then
+    print_warn "seatd" "not installed"
+    return
+  fi
+
+  local enabled status
+  enabled="$(systemctl is-enabled seatd 2>/dev/null || echo "not found")"
+  status="${enabled}"
+  if systemctl is-active --quiet seatd 2>/dev/null; then
+    status="${status}, running"
+  else
+    status="${status}, NOT RUNNING"
+  fi
+  print_field "seatd" "${status}"
+
+  local user
+  for user in "${SUDO_USER:-${USER}}" greeter; do
+    if ! id "${user}" &>/dev/null; then
+      continue
+    fi
+    if id -nG "${user}" 2>/dev/null | grep -qw seat; then
+      print_detail "${user} is in the seat group"
+    else
+      print_warn "seatd" "${user} is not in the seat group"
+    fi
+  done
+}
+
+check_greetd() {
+  if ! has_cmd greetd; then
+    print_warn "greetd" "not installed"
+    return
+  fi
+
+  local enabled status
+  enabled="$(systemctl is-enabled greetd 2>/dev/null || echo "not found")"
+  status="${enabled}"
+  if systemctl is-active --quiet greetd 2>/dev/null; then
+    status="${status}, running"
+  fi
+  print_field "greetd" "${status}"
+
+  if [[ ! -f /etc/greetd/config.toml ]]; then
+    print_warn "greetd" "/etc/greetd/config.toml missing"
+  elif ! grep -q "noctalia-greeter-session" /etc/greetd/config.toml 2>/dev/null; then
+    print_detail "config.toml does not reference noctalia-greeter-session"
+  fi
+}
+
+# See niri-wm/niri#254 -- the VT-switch text flash during the greeter-to-
+# session handoff is this specific, fixable deprecation warning, not an
+# inherent two-compositor artifact.
+check_niri_session_patch() {
+  if ! has_cmd niri-session; then
+    return
+  fi
+
+  if grep -qF "HACK: The following line has been automatically patched" \
+      /usr/bin/niri-session 2>/dev/null; then
+    print_field "niri-session patch" "applied"
+  else
+    print_warn "niri-session patch" \
+      "not applied -- VT-switch text flash will show (niri-wm/niri#254)"
+  fi
+
+  if [[ ! -f /etc/pacman.d/hooks/niri-import-environment-patch.hook ]]; then
+    print_warn "niri-session patch" \
+      "pacman hook missing -- patch will be lost on the next niri update"
+  fi
+}
+
+check_login_stack() {
+  echo ""
+  echo "--- login stack (greetd + noctalia-greeter) ---"
+  echo ""
+  check_seatd
+  check_greetd
+  check_niri_session_patch
+}
+
 print_warnings() {
   if (( ${#WARNINGS[@]} == 0 )); then
     return
@@ -681,6 +768,7 @@ main() {
   check_prereqs
   check_modules
   check_services
+  check_login_stack
   print_warnings
 }
 
